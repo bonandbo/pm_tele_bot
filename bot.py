@@ -900,6 +900,12 @@ async def _post_init(app: Application) -> None:
 
 
 def main() -> None:
+    # Python 3.14 không còn tự tạo event loop — tạo thủ công cho PTB
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
     app = Application.builder().token(config.TELEGRAM_TOKEN).post_init(_post_init).build()
 
     private = filters.ChatType.PRIVATE
