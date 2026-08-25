@@ -26,6 +26,17 @@ ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "").strip()
 _admins = os.getenv("ADMIN_USER_IDS", "").strip()
 ADMIN_USER_IDS = {int(x) for x in _admins.split(",") if x.strip().isdigit()}
 
+# Group được phép dùng bot. Chat ID group là số âm, vd -1001234567890.
+# Cách nhau bởi dấu phẩy. Để trống = bot chạy ở mọi group được add vào.
+_groups = os.getenv("ALLOWED_CHAT_IDS", "").strip()
+ALLOWED_CHAT_IDS = {
+    int(x.strip()) for x in _groups.split(",")
+    if x.strip().lstrip("-").isdigit()
+}
+
+# Danh sách version. Thêm build mới ở đây VÀ thêm option tương ứng trong Notion.
+VERSIONS = ["v1.0", "v1.1", "v1.2"]
+
 NOTION_VERSION = "2022-06-28"
 NOTION_API = "https://api.notion.com/v1"
 

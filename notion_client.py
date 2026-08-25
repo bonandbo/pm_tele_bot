@@ -272,9 +272,19 @@ async def find_by_short_id(db_id: str, id_prop: str, short_id: str) -> Optional[
 
 # ---------------------------------------------------------------- update
 
+async def get_page(page_id: str) -> dict:
+    return await _request("GET", f"/pages/{page_id}")
+
+
 async def update_status(page_id: str, status_prop: str, new_status: str) -> dict:
     return await _request("PATCH", f"/pages/{page_id}", json={
         "properties": {status_prop: _select(new_status)}
+    })
+
+
+async def update_multi_select(page_id: str, prop_name: str, values: list[str]) -> dict:
+    return await _request("PATCH", f"/pages/{page_id}", json={
+        "properties": {prop_name: _multi_select(values)}
     })
 
 
