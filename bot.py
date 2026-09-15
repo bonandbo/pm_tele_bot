@@ -11,10 +11,17 @@ Trong CHAT RIÊNG (đầy đủ, từng bước):
   /bug, /feature → hỏi lần lượt từng trường.
 
 Xem & quản lý (cả hai nơi):
-  /bugs, /features, /status <ID>, /me, /huy
+  /bugs [-open|-fixing|-fixed|-confirmed] [vX.Y], /features, /status <ID>, /me, /huy
+
+Tiến độ bug theo 4 cột board (admin):
+  /fixbug <ID>            Open → Đang làm
+  /fixed <ID> <version>   Đang làm → Đã fix (+ Version fix)
+  /confirmed <ID> [ver]   Đã fix → Confirmed
+  /reopened <ID> <lý do>  Đã fix → Open (lý do ghi vào comment)
 """
 import html
 import logging
+import re
 from typing import Optional
 import asyncio
 
@@ -86,6 +93,30 @@ def _reporter_name(update: Update) -> str:
 
 def _short(page_id: str) -> str:
     return page_id.replace("-", "")
+
+
+_BUG_ID_RE = re.compile(r"^(?:BUG-?)?(\d+)$", re.IGNORECASE)
+
+
+def _parse_bug_args(args: list[str]) -> tuple[Optional[str], str]:
+    """['bug-44', 'v1.3'] → ('BUG-44', 'v1.3'). Nhận cả '44'. ID sai → (None, '')."""
+    if not args:
+        return None, ""
+    m = _BUG_ID_RE.match(args[0].strip())
+    if not m:
+        return None, ""
+    rest = " ".join(a.strip() for a in args[1:]).strip()
+    return f"BUG-{int(m.group(1))}", rest
+
+
+def _normalize_version(raw: str) -> Optional[str]:
+    """'1.3' → 'v1.3', 'V0.0.8' → 'v0.0.8'. Rỗng hoặc không có chữ số → None."""
+    v = (raw or "").strip()
+    if v[:1] in ("v", "V"):
+        v = v[1:]
+    if not any(ch.isdigit() for ch in v):
+        return None
+    return f"v{v}"
 
 
 async def _photo_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Optional[str]:
@@ -228,20 +259,28 @@ HELP_GROUP = (
     "<code>/feature Tên feature | mô tả</code>\n"
     "Reply vào một ảnh rồi gõ lệnh để đính ảnh đó.\n\n"
     "<b>Xem danh sách:</b>\n"
-    "/bugs — bug chưa xử lý xong\n"
-    "/bugs v1.2 — lọc theo version\n"
+    "/bugs — bug mới báo cáo (mặc định -open)\n"
+    "/bugs -fixing · -fixed · -confirmed — theo cột board\n"
+    "/bugs -fixed v1.2 — kết hợp lọc version\n"
     "/features — feature request\n"
     "/me — những gì mình đã gửi\n\n"
-    "<b>Admin:</b> /status BUG-12 để đổi trạng thái."
+    "<b>Admin — tiến độ bug:</b>\n"
+    "/fixbug BUG-44 — nhận fix (Open → Đang làm)\n"
+    "/fixed BUG-44 v1.3 — đã fix ở version đó (→ Đã fix)\n"
+    "/confirmed BUG-44 [v1.3] — QA xác nhận (→ Confirmed)\n"
+    "/reopened BUG-44 lý do — vẫn lỗi, mở lại (→ Open)\n"
+    "/status BUG-12 — chọn trạng thái bất kỳ."
 )
 
 HELP_PRIVATE = (
     "<b>VLTK Dev Tracker Bot</b>\n\n"
     "🐛 /bug — báo bug (hỏi từng bước)\n"
     "💡 /feature — đề xuất tính năng\n"
-    "📋 /bugs — danh sách bug\n"
+    "📋 /bugs [-open|-fixing|-fixed|-confirmed] — danh sách bug\n"
     "📋 /features — danh sách feature\n"
     "🔄 /status &lt;ID&gt; — đổi trạng thái (admin)\n"
+    "🔨 /fixbug BUG-44 · 🎉 /fixed BUG-44 v1.3\n"
+    "☑️ /confirmed BUG-44 · 🔁 /reopened BUG-44 lý do\n"
     "👤 /me — những gì mình đã gửi\n"
     "❌ /huy — huỷ thao tác đang làm\n\n"
     "Trong group có thể báo nhanh một dòng:\n"
@@ -643,43 +682,85 @@ async def feat_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 # ================================================================ danh sách
 
+# Cờ /bugs → key trong config.BUG_FLOW
+_BUGS_FLAGS = {"open": "open", "fixing": "doing", "fixed": "fixed", "confirmed": "confirmed"}
+_BUGS_OPEN_ALIASES = ("open", "mo", "mở", "chua", "chưa")
+_BUGS_MAX_LINES = 15
+
+BUGS_USAGE = (
+    "Cú pháp: <code>/bugs [-open|-fixing|-fixed|-confirmed] [v1.3]</code>\n"
+    "-open: mới báo cáo (mặc định) · -fixing: đang làm · "
+    "-fixed: đã fix chưa confirm · -confirmed: đã confirm"
+)
+
+
+def _parse_bugs_args(args: list[str]) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """/bugs [-open|-fixing|-fixed|-confirmed] [vX.Y] [tên trạng thái] → (status, version, error).
+
+    Không có cờ → mặc định -open. Có error → caller reply usage.
+    """
+    status: Optional[str] = None
+    version: Optional[str] = None
+    words: list[str] = []
+    for a in args:
+        a = a.strip()
+        if not a:
+            continue
+        low = a.lower()
+        if low.startswith("-"):
+            key = low.lstrip("-")
+            if key not in _BUGS_FLAGS:
+                return None, None, f"Không hiểu cờ <code>{html.escape(a)}</code>."
+            status = config.BUG_FLOW[_BUGS_FLAGS[key]]
+        elif low in _BUGS_OPEN_ALIASES:
+            status = config.BUG_FLOW["open"]
+        elif low.startswith("v") and any(ch.isdigit() for ch in low):
+            version = a
+        else:
+            words.append(low)
+    if status is None and words:
+        joined = " ".join(words)
+        status = next((s for s in config.BUG_STATUSES if s.lower() in joined), None)
+    return status or config.BUG_FLOW["open"], version, None
+
+
 async def cmd_bugs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _guard_group(update):
         return
-    args = [a.strip() for a in context.args] if context.args else []
-    joined = " ".join(args).lower()
-    version = next((a for a in args if a.lower().startswith("v")), None)
-    status = next((s for s in config.BUG_STATUSES if s.lower() in joined), None)
-    open_only = not args or any(a.lower() in ("open", "mo", "mở", "chua", "chưa") for a in args)
+    status, version, err = _parse_bugs_args(context.args or [])
+    if err:
+        await update.message.reply_text(f"{err}\n{BUGS_USAGE}", parse_mode=ParseMode.HTML)
+        return
 
     await update.message.chat.send_action("typing")
     try:
-        pages = await nc.query_bugs(version=version, status=status, open_only=open_only)
+        pages = await nc.query_bugs(status=status, version=version, limit=None)
     except Exception as exc:
         await update.message.reply_text(f"❌ Không lấy được dữ liệu: {exc}")
         return
 
+    # Dòng đầu: số bug ở trạng thái đó (đếm đủ, không chỉ phần hiển thị)
+    head = f"{config.STATUS_EMOJI.get(status, '🐛')} <b>{status}</b>: {len(pages)} bug"
+    if version:
+        head += f" · 📦 {html.escape(version)}"
+
     if not pages:
-        await update.message.reply_text("Không có bug nào khớp điều kiện. 🎉")
+        await update.message.reply_text(f"{head} 🎉", parse_mode=ParseMode.HTML)
         return
 
-    header = "🐛 <b>Danh sách bug</b>"
-    if version:
-        header += f" — {version}"
-    if status:
-        header += f" — {status}"
-    elif open_only:
-        header += " — chưa xử lý xong"
-
-    lines = [header, ""]
+    lines = [head, ""]
     buttons = []
-    for page in pages[:15]:
+    for page in pages[:_BUGS_MAX_LINES]:
         lines.append(nc.format_bug_line(page))
         short_id = nc.get_short_id(page, config.BUG_PROPS["id"])
         title = nc.get_title(page, config.BUG_PROPS["title"])
         buttons.append([InlineKeyboardButton(
             f"{short_id} · {title[:28]}", url=nc.page_url(page["id"])
         )])
+    if len(pages) > _BUGS_MAX_LINES:
+        lines.append("")
+        lines.append(f"<i>… hiện {_BUGS_MAX_LINES}/{len(pages)}, xem đủ trong Notion</i>")
+        buttons.append([InlineKeyboardButton("📋 Mở Bug Tracker", url=nc.bug_db_url())])
 
     await update.message.reply_text(
         "\n".join(lines),
@@ -812,19 +893,201 @@ async def on_status_click(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         reply_markup=kb,
     )
 
-    reporter_chat = nc.get_prop(page, props["telegram_id"])
-    done = new_status in ("Đã fix", "Hoàn thành")
-    if done and reporter_chat and reporter_chat != str(update.effective_chat.id):
+    if new_status in ("Đã fix", "Hoàn thành"):
+        await _notify_reporter(
+            update, context, page, props["telegram_id"],
+            f"🎉 <b>{short_id}</b> {html.escape(title)}\n"
+            f"đã chuyển sang <b>{new_status}</b>. Cảm ơn báo cáo của bạn!",
+            kb,
+        )
+
+
+async def _notify_reporter(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    page: dict,
+    telegram_id_prop: str,
+    text: str,
+    kb: InlineKeyboardMarkup,
+) -> None:
+    """Nhắn về nơi đã báo cáo (Telegram ID lưu trong Notion), trừ khi chính là chat hiện tại."""
+    reporter_chat = nc.get_prop(page, telegram_id_prop)
+    if not reporter_chat or reporter_chat == str(update.effective_chat.id):
+        return
+    try:
+        await context.bot.send_message(
+            reporter_chat, text, parse_mode=ParseMode.HTML, reply_markup=kb
+        )
+    except Exception:
+        log.info("Không gửi được thông báo tới %s", reporter_chat)
+
+
+# ================================================================ tiến độ bug: /fixbug /fixed /confirmed /reopened
+
+async def _move_prelude(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, usage: str
+) -> tuple[Optional[str], str]:
+    """Kiểm tra group + quyền admin, parse '<BugID> <phần còn lại>'.
+
+    Trả (None, '') khi đã reply lỗi cho user — caller chỉ cần return.
+    """
+    if not await _guard_group(update):
+        return None, ""
+    if not _is_admin(update):
+        await update.message.reply_text("Chỉ admin mới đổi được trạng thái.")
+        return None, ""
+    bug_id, rest = _parse_bug_args(context.args or [])
+    if not bug_id:
+        await update.message.reply_text(
+            f"Cú pháp: <code>{html.escape(usage)}</code>", parse_mode=ParseMode.HTML
+        )
+        return None, ""
+    return bug_id, rest
+
+
+async def _move_bug(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    bug_id: str,
+    *,
+    target: str,
+    expected_from: str,
+    version: Optional[str] = None,
+    reason: Optional[str] = None,
+    notify_text: Optional[str] = None,
+) -> None:
+    """Lõi chung: chuyển bug sang cột `target`.
+
+    Không ép bug phải đang ở `expected_from` — vẫn chuyển nhưng cảnh báo trong reply
+    để cả group thấy nó nhảy cóc. `reason` (reopen) ghi vào comment Notion.
+    `notify_text` nếu có sẽ nhắn về nơi đã báo cáo bug.
+    """
+    p = config.BUG_PROPS
+    em = config.STATUS_EMOJI
+    await update.message.chat.send_action("typing")
+
+    page = await nc.find_by_short_id(config.BUG_DB_ID, p["id"], bug_id)
+    if not page:
+        await update.message.reply_text(f"Không tìm thấy {bug_id}.")
+        return
+
+    title = nc.get_title(page, p["title"])
+    current = nc.get_prop(page, p["status"])
+    head = f"<b>{bug_id}</b> {html.escape(title)}"
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("📄 Mở trong Notion", url=nc.page_url(page["id"]))
+    ]])
+
+    if current == target and not version and not reason:
+        await update.message.reply_text(
+            f"{head}\nđang ở {em.get(target, '')} <b>{target}</b> rồi, không đổi gì.",
+            parse_mode=ParseMode.HTML, reply_markup=kb,
+        )
+        return
+
+    try:
+        page = await nc.update_bug_status(page["id"], target, version)
+    except Exception as exc:
+        log.exception("Chuyển %s → %s thất bại", bug_id, target)
+        await update.message.reply_text(f"❌ Cập nhật thất bại: {exc}")
+        return
+
+    comment_kind = None
+    if reason:
         try:
-            await context.bot.send_message(
-                reporter_chat,
-                f"🎉 <b>{short_id}</b> {html.escape(title)}\n"
-                f"đã chuyển sang <b>{new_status}</b>. Cảm ơn báo cáo của bạn!",
-                parse_mode=ParseMode.HTML,
-                reply_markup=kb,
+            comment_kind = await nc.add_comment(
+                page["id"], f"🔁 Reopen bởi {_reporter_name(update)}: {reason}"
             )
         except Exception:
-            log.info("Không gửi được thông báo tới %s", reporter_chat)
+            log.exception("Ghi lý do reopen cho %s thất bại", bug_id)
+
+    lines = [f"✅ {head}"]
+    if current == target:
+        lines.append(f"vẫn ở {em.get(target, '')} <b>{target}</b>")
+    else:
+        cur_label = f"{em.get(current, '')} {current}".strip() if current else "chưa có trạng thái"
+        lines.append(f"{cur_label} → {em.get(target, '')} <b>{target}</b>")
+        if current != expected_from:
+            lines.append(f"⚠️ <i>nhảy từ {cur_label}, bình thường phải từ {expected_from}</i>")
+    if version:
+        lines.append(f"📦 Version fix: <b>{html.escape(version)}</b>")
+    if reason:
+        if comment_kind == "comment":
+            lines.append(f"💬 Lý do: {html.escape(reason)}")
+        elif comment_kind == "callout":
+            lines.append(f"📝 Lý do (ghi vào body page): {html.escape(reason)}")
+        else:
+            lines.append(f"⚠️ Không ghi được lý do vào Notion: {html.escape(reason)}")
+    lines.append(f"<i>đổi bởi {html.escape(_reporter_name(update))}</i>")
+
+    await update.message.reply_text(
+        "\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=kb
+    )
+
+    if notify_text:
+        await _notify_reporter(
+            update, context, page, p["telegram_id"], f"{head}\n{notify_text}", kb
+        )
+
+
+async def cmd_fixbug(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/fixbug BUG-44 — nhận fix: Open → Đang làm."""
+    bug_id, _ = await _move_prelude(update, context, "/fixbug BUG-44")
+    if not bug_id:
+        return
+    flow = config.BUG_FLOW
+    await _move_bug(update, context, bug_id, target=flow["doing"], expected_from=flow["open"])
+
+
+async def cmd_fixed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/fixed BUG-44 v1.3 — Đang làm → Đã fix, ghi Version fix, nhắn người báo cáo."""
+    bug_id, rest = await _move_prelude(update, context, "/fixed BUG-44 v1.3")
+    if not bug_id:
+        return
+    version = _normalize_version(rest.split()[0]) if rest else None
+    if not version:
+        await update.message.reply_text(
+            "Thiếu version fix. Cú pháp: <code>/fixed BUG-44 v1.3</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    flow = config.BUG_FLOW
+    await _move_bug(
+        update, context, bug_id,
+        target=flow["fixed"], expected_from=flow["doing"], version=version,
+        notify_text=f"🎉 đã fix ở <b>{html.escape(version)}</b>, nhờ verify giúp nhé.",
+    )
+
+
+async def cmd_confirmed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/confirmed BUG-44 [v1.3] — Đã fix → Confirmed. Version tuỳ chọn."""
+    bug_id, rest = await _move_prelude(update, context, "/confirmed BUG-44 [v1.3]")
+    if not bug_id:
+        return
+    version = _normalize_version(rest.split()[0]) if rest else None
+    flow = config.BUG_FLOW
+    await _move_bug(
+        update, context, bug_id,
+        target=flow["confirmed"], expected_from=flow["fixed"], version=version,
+    )
+
+
+async def cmd_reopened(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/reopened BUG-44 <lý do> — Đã fix → Open, lý do ghi vào comment Notion."""
+    bug_id, reason = await _move_prelude(update, context, "/reopened BUG-44 lý do")
+    if not bug_id:
+        return
+    if not reason:
+        await update.message.reply_text(
+            "Thiếu lý do reopen. Cú pháp: <code>/reopened BUG-44 vẫn crash khi vào map</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    flow = config.BUG_FLOW
+    await _move_bug(
+        update, context, bug_id,
+        target=flow["open"], expected_from=flow["fixed"], reason=reason,
+    )
 
 
 # ================================================================ /me, /id
@@ -889,9 +1152,13 @@ async def _post_init(app: Application) -> None:
     group_cmds = [
         BotCommand("bug", "Báo bug: /bug Tiêu đề | mô tả"),
         BotCommand("feature", "Đề xuất: /feature Tên | mô tả"),
-        BotCommand("bugs", "Danh sách bug"),
+        BotCommand("bugs", "Danh sách bug: -open|-fixing|-fixed|-confirmed"),
         BotCommand("features", "Danh sách feature"),
         BotCommand("status", "Đổi trạng thái (admin)"),
+        BotCommand("fixbug", "Nhận fix: /fixbug BUG-44"),
+        BotCommand("fixed", "Đã fix: /fixed BUG-44 v1.3"),
+        BotCommand("confirmed", "QA xác nhận: /confirmed BUG-44"),
+        BotCommand("reopened", "Mở lại: /reopened BUG-44 lý do"),
         BotCommand("me", "Những gì mình đã gửi"),
         BotCommand("help", "Hướng dẫn"),
     ]
@@ -966,6 +1233,10 @@ def main() -> None:
     app.add_handler(CommandHandler("bugs", cmd_bugs))
     app.add_handler(CommandHandler("features", cmd_features))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler(["fixbug", "fizzbug"], cmd_fixbug))
+    app.add_handler(CommandHandler("fixed", cmd_fixed))
+    app.add_handler(CommandHandler("confirmed", cmd_confirmed))
+    app.add_handler(CommandHandler("reopened", cmd_reopened))
     app.add_handler(CommandHandler("me", cmd_me))
     app.add_handler(CommandHandler("id", cmd_id))
     app.add_handler(CallbackQueryHandler(on_status_click, pattern=r"^st\|"))

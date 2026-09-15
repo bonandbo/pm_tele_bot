@@ -17,7 +17,7 @@ View: Bảng mặc định · **Tiến độ (Board)** gom theo Status · **Theo
 **Feature Requests** — Tên feature, FR ID, Status, Impact, Effort, Version dự kiến, Module, Người đề xuất, Người phụ trách, Ngày đề xuất, Cập nhật lần cuối, Telegram ID.
 View: Bảng mặc định · **Tiến độ (Board)** gom theo Status.
 
-Trạng thái bug: Mới báo cáo → Đã xác nhận → Đang fix → Chờ verify → Đã fix (+ Không fix, Trùng lặp).
+Trạng thái bug theo board 4 cột: **Mới báo cáo** (Open) → **Đang làm** → **Đã fix** (chờ QA confirm) → **Confirmed** (+ Không fix, Trùng lặp). Các trạng thái cũ Đã xác nhận / Đang fix / Chờ verify vẫn chọn được qua `/status`.
 Trạng thái feature: Mới đề xuất → Đang xem xét → Đã duyệt → Đang làm → Hoàn thành (+ Từ chối, Hoãn lại).
 
 ## Cài đặt
@@ -118,21 +118,43 @@ Muốn kết quả vẫn hiện ở group dev thì điền `ADMIN_CHAT_ID` = cha
 
 | Lệnh | Tác dụng |
 |---|---|
-| `/bugs` | Bug chưa xử lý xong |
-| `/bugs v1.2` | Bug của version 1.2 |
-| `/bugs Đang fix` | Bug theo trạng thái |
+| `/bugs` | Bug mới báo cáo (Open) — giống `/bugs -open` |
+| `/bugs -fixing` | Bug đang làm |
+| `/bugs -fixed` | Bug đã fix, chưa confirm |
+| `/bugs -confirmed` | Bug đã confirm |
+| `/bugs -fixed v1.2` | Kết hợp lọc theo version phát hiện |
+| `/bugs Đang fix` | Bug theo tên trạng thái bất kỳ |
 | `/features` | Toàn bộ feature request |
 | `/features v1.2` | Feature theo version dự kiến |
 | `/status BUG-12` | Hiện nút chọn trạng thái mới (admin) |
 | `/status FR-3` | Tương tự cho feature |
+| `/fixbug BUG-12` | Nhận fix: Open → Đang làm (admin) |
+| `/fixed BUG-12 v1.3` | Đang làm → Đã fix, ghi Version fix = v1.3, nhắn người báo cáo nhờ verify (admin) |
+| `/confirmed BUG-12 [v1.3]` | Đã fix → Confirmed, version tuỳ chọn (admin) |
+| `/reopened BUG-12 lý do` | Đã fix → Open, lý do ghi vào comment Notion (admin) |
 | `/me` | Bug/feature mình đã gửi |
 | `/id` | Lấy chat ID + user ID |
 | `/huy` | Huỷ phiên đang khai dở (chat riêng) |
 | `/help` | Hướng dẫn |
 
-Mọi danh sách đều kèm nút mở thẳng trang Notion tương ứng.
+Mọi danh sách đều kèm nút mở thẳng trang Notion tương ứng. `/bugs` mở đầu bằng dòng **số bug** ở trạng thái đó (đếm đủ, kể cả khi chỉ hiện 15 dòng đầu).
 
 Khi admin chuyển bug sang **Đã fix** (hoặc feature sang **Hoàn thành**), bot tự nhắn lại nơi đã báo cáo.
+
+### Tiến độ bug: 4 lệnh theo board
+
+```
+/fixbug BUG-44            Mới báo cáo → Đang làm
+/fixed BUG-44 v1.3        Đang làm → Đã fix   (+ Version fix = v1.3)
+/confirmed BUG-44 [v1.3]  Đã fix → Confirmed
+/reopened BUG-44 lý do    Đã fix → Mới báo cáo (lý do ghi vào comment)
+```
+
+- Bug ID nhận cả `BUG-44`, `bug-44` hay `44`. Version thiếu chữ `v` được tự thêm (`1.3` → `v1.3`); không cần có sẵn trong `VERSIONS`, Notion tự tạo option.
+- Bug **không** bị ép phải đang ở đúng cột nguồn — bot vẫn chuyển nhưng reply kèm `⚠️ nhảy từ …` để cả group thấy.
+- Gõ lại khi bug đã ở cột đích thì bot báo "không đổi gì" (trừ khi kèm version mới → chỉ cập nhật Version fix).
+- `/reopened` ghi lý do bằng **Notion comment**. Việc này cần integration bật *Insert comments* (notion.so/my-integrations → integration → Capabilities). Chưa bật thì bot tự ghi thành **callout** ở cuối body page, không mất lý do.
+- `/bugs -open` / `-fixing` / `-fixed` / `-confirmed` liệt kê đúng 4 cột này; `/bugs` không cờ = `-open`.
 
 ## Vì sao phiên khai báo phải diễn ra ở chat riêng
 
@@ -210,6 +232,7 @@ vltk-bot/
 ├── bot.py             # handler Telegram: lệnh group, phiên chat riêng, nút bấm
 ├── notion_client.py   # gọi Notion API, format dữ liệu
 ├── config.py          # biến môi trường, tên property, danh sách option
+├── tests/             # pytest cho phần parse tham số lệnh (python -m pytest tests)
 ├── requirements.txt
 ├── .env.example
 └── README.md

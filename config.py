@@ -68,9 +68,17 @@ FEATURE_PROPS = {
 
 # ---- Giá trị select (phải khớp option trong Notion) ----
 BUG_STATUSES = [
-    "Mới báo cáo", "Đã xác nhận", "Đang fix",
-    "Chờ verify", "Đã fix", "Không fix", "Trùng lặp",
+    "Mới báo cáo", "Đã xác nhận", "Đang fix", "Đang làm",
+    "Chờ verify", "Đã fix", "Confirmed", "Không fix", "Trùng lặp",
 ]
+# Luồng 4 cột trên board Notion: Open → Đang làm → Đã fix → Confirmed.
+# Dùng bởi /fixbug, /fixed, /confirmed, /reopened và các cờ của /bugs.
+BUG_FLOW = {
+    "open": "Mới báo cáo",
+    "doing": "Đang làm",
+    "fixed": "Đã fix",
+    "confirmed": "Confirmed",
+}
 FEATURE_STATUSES = [
     "Mới đề xuất", "Đang xem xét", "Đã duyệt",
     "Đang làm", "Hoàn thành", "Từ chối", "Hoãn lại",
@@ -86,7 +94,8 @@ MODULES = [
 
 STATUS_EMOJI = {
     "Mới báo cáo": "🆕", "Đã xác nhận": "✅", "Đang fix": "🔧",
-    "Chờ verify": "🔍", "Đã fix": "🎉", "Không fix": "🚫", "Trùng lặp": "♻️",
+    "Chờ verify": "🔍", "Đã fix": "🎉", "Confirmed": "☑️",
+    "Không fix": "🚫", "Trùng lặp": "♻️",
     "Mới đề xuất": "🆕", "Đang xem xét": "🤔", "Đã duyệt": "👍",
     "Đang làm": "🔨", "Hoàn thành": "🎉", "Từ chối": "❌", "Hoãn lại": "⏸️",
 }

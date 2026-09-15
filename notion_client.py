@@ -18,6 +18,9 @@ _HEADERS = {
 # Notion giới hạn ~3 request/giây. Semaphore + delay nhỏ để không bị 429.
 _sem = asyncio.Semaphore(3)
 
+# Trần số page kéo về khi query không giới hạn (limit=None) — tránh lặp vô tận.
+_MAX_QUERY = 500
+
 
 async def _request(method: str, path: str, **kwargs) -> dict[str, Any]:
     url = f"{config.NOTION_API}{path}"
@@ -83,6 +86,10 @@ def _plain(prop: Optional[dict]) -> str:
 
 def page_url(page_id: str) -> str:
     return f"https://www.notion.so/{page_id.replace('-', '')}"
+
+
+def bug_db_url() -> str:
+    return page_url(config.BUG_DB_ID)
 
 
 # ---------------------------------------------------------------- create
@@ -203,9 +210,9 @@ async def query_bugs(
     status: Optional[str] = None,
     version: Optional[str] = None,
     severity: Optional[str] = None,
-    open_only: bool = False,
-    limit: int = 20,
+    limit: Optional[int] = 20,
 ) -> list[dict]:
+    """limit=None → kéo hết (theo next_cursor, trần _MAX_QUERY) để đếm được chính xác."""
     p = config.BUG_PROPS
     filters = []
     if status:
@@ -214,12 +221,10 @@ async def query_bugs(
         filters.append({"property": p["version_found"], "select": {"equals": version}})
     if severity:
         filters.append({"property": p["severity"], "select": {"equals": severity}})
-    if open_only:
-        for done in ("Đã fix", "Không fix", "Trùng lặp"):
-            filters.append({"property": p["status"], "select": {"does_not_equal": done}})
 
+    cap = _MAX_QUERY if limit is None else limit
     body: dict[str, Any] = {
-        "page_size": min(limit, 100),
+        "page_size": min(cap, 100),
         "sorts": [
             {"property": p["priority"], "direction": "ascending"},
             {"timestamp": "created_time", "direction": "descending"},
@@ -228,8 +233,14 @@ async def query_bugs(
     if filters:
         body["filter"] = {"and": filters} if len(filters) > 1 else filters[0]
 
-    data = await _request("POST", f"/databases/{config.BUG_DB_ID}/query", json=body)
-    return data.get("results", [])
+    results: list[dict] = []
+    while True:
+        data = await _request("POST", f"/databases/{config.BUG_DB_ID}/query", json=body)
+        results.extend(data.get("results", []))
+        if not data.get("has_more") or len(results) >= cap:
+            break
+        body["start_cursor"] = data["next_cursor"]
+    return results[:cap]
 
 
 async def query_features(
@@ -292,6 +303,52 @@ async def update_property(page_id: str, prop_name: str, value: Optional[str]) ->
     return await _request("PATCH", f"/pages/{page_id}", json={
         "properties": {prop_name: _select(value)}
     })
+
+
+async def update_bug_status(
+    page_id: str, status: str, version_fixed: Optional[str] = None
+) -> dict:
+    """Đổi Status bug, kèm Version fix nếu có — một request PATCH duy nhất.
+
+    Không kiểm tra version với config.VERSIONS: Notion tự tạo option select mới.
+    """
+    p = config.BUG_PROPS
+    props = {p["status"]: _select(status)}
+    if version_fixed:
+        props[p["version_fixed"]] = _select(version_fixed)
+    return await _request("PATCH", f"/pages/{page_id}", json={"properties": props})
+
+
+async def add_comment(page_id: str, text: str) -> str:
+    """Ghi comment lên page. Trả về 'comment' hoặc 'callout' tuỳ cách ghi được.
+
+    Comment API cần integration bật "Insert comments" (notion.so/my-integrations).
+    Chưa bật → Notion trả 403; khi đó ghi thành callout ở cuối body page để
+    không mất nội dung.
+    """
+    rich = [{"type": "text", "text": {"content": text[:2000]}}]
+    try:
+        await _request("POST", "/comments", json={
+            "parent": {"page_id": page_id},
+            "rich_text": rich,
+        })
+        return "comment"
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code != 403:
+            raise
+        log.warning("Integration chưa có quyền Insert comments — ghi callout thay thế")
+
+    await _request("PATCH", f"/blocks/{page_id}/children", json={
+        "children": [{
+            "object": "block",
+            "type": "callout",
+            "callout": {
+                "rich_text": rich,
+                "icon": {"type": "emoji", "emoji": "🔁"},
+            },
+        }],
+    })
+    return "callout"
 
 
 # ---------------------------------------------------------------- format
