@@ -1,6 +1,7 @@
 """Lớp bọc Notion API — tạo page, query, update status, upload ảnh."""
 import asyncio
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 import httpx
@@ -130,6 +131,8 @@ async def create_bug(
                 "type": "image",
                 "image": {"type": "external", "external": {"url": url}},
             })
+    children += _text_block("heading_2", HISTORY_HEADING)
+    children += _history_item(f"Tạo bug · Mới báo cáo · bởi {reporter or '?'}")
 
     return await _request("POST", "/pages", json={
         "parent": {"database_id": config.BUG_DB_ID},
@@ -349,6 +352,55 @@ async def add_comment(page_id: str, text: str) -> str:
         }],
     })
     return "callout"
+
+
+# ---------------------------------------------------------------- lịch sử
+
+HISTORY_HEADING = "📜 Lịch sử"
+_VN_TZ = timezone(timedelta(hours=7))
+
+
+def _history_item(text: str) -> list[dict]:
+    stamp = datetime.now(_VN_TZ).strftime("%d/%m/%Y %H:%M")
+    return [{
+        "object": "block",
+        "type": "bulleted_list_item",
+        "bulleted_list_item": {"rich_text": [
+            {"type": "text", "text": {"content": f"{stamp} — "},
+             "annotations": {"code": True}},
+            {"type": "text", "text": {"content": text[:1900]}},
+        ]},
+    }]
+
+
+async def _has_history_heading(page_id: str) -> bool:
+    cursor = None
+    while True:
+        params = {"page_size": 100}
+        if cursor:
+            params["start_cursor"] = cursor
+        data = await _request("GET", f"/blocks/{page_id}/children", params=params)
+        for b in data.get("results", []):
+            if b.get("type") == "heading_2":
+                txt = "".join(x.get("plain_text", "") for x in b["heading_2"].get("rich_text", []))
+                if txt.strip() == HISTORY_HEADING:
+                    return True
+        if not data.get("has_more"):
+            return False
+        cursor = data.get("next_cursor")
+
+
+async def log_history(page_id: str, text: str) -> None:
+    """Thêm 1 dòng vào mục "📜 Lịch sử" cuối page (tạo heading nếu page cũ chưa có).
+
+    Dùng cho mọi thao tác bot làm với bug: đổi status, sửa field, reopen...
+    Lỗi ở đây không nên làm hỏng thao tác chính — caller nên try/except.
+    """
+    children: list[dict] = []
+    if not await _has_history_heading(page_id):
+        children += _text_block("heading_2", HISTORY_HEADING)
+    children += _history_item(text)
+    await _request("PATCH", f"/blocks/{page_id}/children", json={"children": children})
 
 
 # ---------------------------------------------------------------- format

@@ -433,13 +433,16 @@ async def on_field_click(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     try:
         if kind == "sv":
             value = config.SEVERITIES[int(idx)]
-            page = await nc.update_property(pid, p["severity"], value)
+            prop_label = p["severity"]
+            page = await nc.update_property(pid, prop_label, value)
         elif kind == "vr":
             value = config.VERSIONS[int(idx)]
-            page = await nc.update_property(pid, p["version_found"], value)
+            prop_label = p["version_found"]
+            page = await nc.update_property(pid, prop_label, value)
         elif kind == "md":
             value = config.MODULES[int(idx)]
-            page = await nc.update_multi_select(pid, p["module"], [value])
+            prop_label = p["module"]
+            page = await nc.update_multi_select(pid, prop_label, [value])
         else:
             await query.answer()
             return
@@ -447,6 +450,11 @@ async def on_field_click(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         log.exception("Cập nhật field thất bại")
         await query.answer(f"Lỗi: {exc}", show_alert=True)
         return
+
+    try:
+        await nc.log_history(pid, f"{prop_label} = {value} · bởi {_reporter_name(update)}")
+    except Exception:
+        log.exception("Ghi lịch sử sửa field thất bại")
 
     await query.answer(f"Đã đặt: {value}")
     text, kb = _bug_card(page)
@@ -991,6 +999,16 @@ async def _move_bug(
         log.exception("Chuyển %s → %s thất bại", bug_id, target)
         await update.message.reply_text(f"❌ Cập nhật thất bại: {exc}")
         return
+
+    hist = f"{current or '—'} → {target} · bởi {_reporter_name(update)}"
+    if version:
+        hist += f" · Version fix {version}"
+    if reason:
+        hist += f" · lý do: {reason}"
+    try:
+        await nc.log_history(page["id"], hist)
+    except Exception:
+        log.exception("Ghi lịch sử cho %s thất bại", bug_id)
 
     comment_kind = None
     if reason:
