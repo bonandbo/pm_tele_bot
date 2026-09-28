@@ -112,3 +112,16 @@ LLM_BASE_URL = os.getenv(
 ).strip()
 LLM_API_KEY = os.getenv("LLM_API_KEY", "").strip()
 LLM_MODEL = os.getenv("LLM_MODEL", "").strip()
+
+# ---- GitHub issue cho AI agent ----
+# Token fine-grained, chỉ 1 repo, quyền Issues: write + Contents: write.
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "").strip()
+GITHUB_REPO = os.getenv("GITHUB_REPO", "").strip()          # owner/repo
+GITHUB_LABELS = [
+    x.strip() for x in os.getenv("GITHUB_LABELS", "bug").split(",") if x.strip()
+]
+# Branch riêng chứa ảnh bug — tạo tay 1 lần (xem README)
+GITHUB_ASSETS_BRANCH = os.getenv("GITHUB_ASSETS_BRANCH", "bug-assets").strip()
+
+# Thiếu bất kỳ biến nào → tắt tính năng, bot chạy như cũ
+GITHUB_ENABLED = all([LLM_API_KEY, LLM_MODEL, GITHUB_TOKEN, GITHUB_REPO])
