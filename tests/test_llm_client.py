@@ -167,6 +167,35 @@ def test_draft_issue_sends_openai_request(monkeypatch):
     assert body["temperature"] == 0.2
 
 
+def _sent_body(monkeypatch, disable_thinking):
+    seen = []
+
+    def handler(request):
+        seen.append(json.loads(request.content))
+        return _ok(_reply())
+
+    _setup(monkeypatch, handler)
+    monkeypatch.setattr(config, "LLM_DISABLE_THINKING", disable_thinking)
+    asyncio.run(llm_client.draft_issue(_bug(), [], final=False))
+    return seen[0]
+
+
+def test_thinking_disabled_sends_enable_thinking_false(monkeypatch):
+    """Qwen3 trên DashScope bật thinking sẵn: BUG-107 mất 52.7s (2255/2490 token là reasoning) → timeout."""
+    assert _sent_body(monkeypatch, True)["enable_thinking"] is False
+
+
+def test_thinking_flag_off_sends_nothing(monkeypatch):
+    assert "enable_thinking" not in _sent_body(monkeypatch, False)
+
+
+def test_disable_thinking_default_follows_provider():
+    assert config.default_disable_thinking("https://dashscope-intl.aliyuncs.com/compatible-mode/v1", "") is True
+    assert config.default_disable_thinking("https://api.deepseek.com", "") is False
+    assert config.default_disable_thinking("https://api.deepseek.com", "1") is True
+    assert config.default_disable_thinking("https://dashscope.aliyuncs.com/compatible-mode/v1", "0") is False
+
+
 def test_draft_issue_retries_once_on_bad_json(monkeypatch):
     replies = iter(["không phải json", _reply()])
     calls = []

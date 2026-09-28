@@ -118,6 +118,18 @@ LLM_BASE_URL = os.getenv(
 LLM_API_KEY = os.getenv("LLM_API_KEY", "").strip()
 LLM_MODEL = os.getenv("LLM_MODEL", "").strip()
 
+
+def default_disable_thinking(base_url: str, raw: str) -> bool:
+    """Qwen3 trên DashScope bật "thinking" sẵn → 50s+/lần, dễ timeout. Mặc định tắt khi dùng DashScope;
+    nhà cung cấp khác không gửi tham số (tránh lỗi tham số lạ). LLM_DISABLE_THINKING=1/0 để ghi đè."""
+    raw = (raw or "").strip().lower()
+    if raw:
+        return raw in ("1", "true", "yes")
+    return "dashscope" in base_url.lower()
+
+
+LLM_DISABLE_THINKING = default_disable_thinking(LLM_BASE_URL, os.getenv("LLM_DISABLE_THINKING", ""))
+
 # ---- GitHub issue cho AI agent ----
 def normalize_github_repo(raw: str) -> str:
     """'https://github.com/owner/repo.git', 'git@github.com:owner/repo.git' → 'owner/repo'."""

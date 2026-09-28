@@ -136,6 +136,8 @@ async def _chat(messages: list[dict]) -> str:
         "temperature": 0.2,
         "response_format": {"type": "json_object"},
     }
+    if config.LLM_DISABLE_THINKING:
+        body["enable_thinking"] = False
     headers = {"Authorization": f"Bearer {config.LLM_API_KEY}"}
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT, transport=_TRANSPORT) as client:
