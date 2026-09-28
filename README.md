@@ -11,7 +11,7 @@ Trang cha: **VLTK Dev Tracker**
 | Bug Tracker | `37ac56fa3c584f08a332f7b927d1fbca` |
 | Feature Requests | `eff48cff0d1d45a8a29d3195e0895338` |
 
-**Bug Tracker** — Tiêu đề, Bug ID (BUG-1, BUG-2... tự tăng), Status, Severity, Priority, Version phát hiện, Version fix, Module, Người báo cáo, Người xử lý, Ngày báo cáo, Cập nhật lần cuối, Telegram ID.
+**Bug Tracker** — Tiêu đề, Bug ID (BUG-1, BUG-2... tự tăng), Status, Severity, Priority, Version phát hiện, Version fix, Module, Người báo cáo, Người xử lý, Nhân vật, Cấp, Bản đồ, GitHub Issue, Ngày báo cáo, Cập nhật lần cuối, Telegram ID.
 View: Bảng mặc định · **Tiến độ (Board)** gom theo Status · **Theo version** gom theo Version phát hiện.
 
 **Feature Requests** — Tên feature, FR ID, Status, Impact, Effort, Version dự kiến, Module, Người đề xuất, Người phụ trách, Ngày đề xuất, Cập nhật lần cuối, Telegram ID.
@@ -60,13 +60,31 @@ python bot.py
 
 Bot **không cần** quyền admin trong group.
 
+### 5. GitHub issue tự động (tuỳ chọn)
+
+Mỗi bug lưu vào Notion được LLM chuyển thành một GitHub issue theo template (Triệu chứng / Cách tái hiện / Môi trường / Log / Miền nghi ngờ) để AI agent đọc. Notion vẫn là nơi người đọc; issue ghi BUG-ID và link Notion, Notion lưu link issue ở cột **GitHub Issue**.
+
+1. **Notion** — thêm 4 cột vào Bug Tracker: `Nhân vật` (Text), `Cấp` (Number), `Bản đồ` (Text), `GitHub Issue` (URL). Tên phải khớp `BUG_PROPS` trong `config.py`.
+2. **GitHub token** — github.com → Settings → Developer settings → Fine-grained tokens → chỉ chọn repo nhận issue, quyền **Issues: Read and write** và **Contents: Read and write**.
+3. **Branch ảnh** — ảnh bug được commit vào branch riêng để không làm bẩn `main`. Tạo một lần trong clone của repo đó:
+   ```bash
+   git switch --orphan bug-assets
+   git commit --allow-empty -m "bug assets"
+   git push -u origin bug-assets
+   git switch main
+   ```
+4. **LLM** — lấy API key ở Alibaba Cloud Model Studio (DashScope) hoặc DeepSeek, điền `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`.
+5. Điền `GITHUB_TOKEN`, `GITHUB_REPO` (`owner/repo`) vào `.env`, restart bot.
+
+Thiếu bất kỳ biến nào ở trên thì tính năng tự tắt, bot chạy như cũ.
+
 ## Cách dùng
 
 ### Trong group — khai báo riêng tư (mặc định)
 
 Gõ `/bug` (không kèm gì) trong group → bot đưa một nút bấm.
 
-Bấm nút → Telegram mở **chat riêng với bot**, bot hỏi lần lượt từng trường (tiêu đề → mô tả → bước tái hiện → severity → version → module → ảnh). **Cả quá trình hỏi đáp chỉ mình người đó thấy.**
+Bấm nút → Telegram mở **chat riêng với bot**, bot hỏi lần lượt từng trường (tiêu đề → mô tả → bước tái hiện → nhân vật → cấp → bản đồ → severity → version → module → ảnh). **Cả quá trình hỏi đáp chỉ mình người đó thấy.**
 
 Khai xong, bot tự đăng thẻ kết quả vào đúng group ban đầu, kèm nút mở trang Notion.
 
@@ -114,6 +132,18 @@ Nhắn riêng cho bot rồi gõ `/bug` hoặc `/feature`. Giống luồng trên 
 
 Muốn kết quả vẫn hiện ở group dev thì điền `ADMIN_CHAT_ID` = chat ID group đó.
 
+### GitHub issue — khi nào bot hỏi lại
+
+Khai xong, bot báo `✅ Đã ghi nhận` rồi `⏳ Đang soạn GitHub issue…`:
+
+- Nội dung đủ rõ → tạo issue luôn, trả nút **🐙 Mở GitHub issue**.
+- Không rõ hiện tượng / không tái hiện được / thông tin mâu thuẫn → bot hỏi tối đa 3 câu. Trả lời trong 1 tin nhắn, hoặc `/boqua` để tạo issue với thông tin hiện có. Tối đa 2 vòng hỏi; bỏ đi quá 10 phút thì bot tự tạo issue từ bản nháp.
+- Câu trả lời bổ sung được ghi vào mục **📜 Lịch sử** của page Notion.
+
+Báo nhanh trong group (`/bug Tiêu đề | mô tả`): thẻ bug hiện ngay, vài giây sau bot gắn thêm nút **🐙 GitHub #34**, hoặc **✍️ Bổ sung cho GitHub issue** nếu cần hỏi thêm — bấm nút đó để trả lời trong chat riêng.
+
+Nếu LLM/GitHub lỗi, bug vẫn nằm trong Notion. Admin chạy `/issue BUG-12` để tạo lại (không hỏi thêm).
+
 ### Lệnh chung
 
 | Lệnh | Tác dụng |
@@ -132,6 +162,8 @@ Muốn kết quả vẫn hiện ở group dev thì điền `ADMIN_CHAT_ID` = cha
 | `/fixed BUG-12 v1.3` | Đang làm → Đã fix, ghi Version fix = v1.3, nhắn người báo cáo nhờ verify (admin) |
 | `/confirmed BUG-12 [v1.3]` | Đã fix → Confirmed, version tuỳ chọn (admin) |
 | `/reopened BUG-12 lý do` | Đã fix → Open, lý do ghi vào comment Notion (admin) |
+| `/issue BUG-12` | Tạo GitHub issue cho bug chưa có (admin) |
+| `/boqua` | Đang bị hỏi bổ sung → tạo issue luôn (chat riêng) |
 | `/me` | Bug/feature mình đã gửi |
 | `/id` | Lấy chat ID + user ID |
 | `/huy` | Huỷ phiên đang khai dở (chat riêng) |
@@ -206,16 +238,11 @@ Chỉ chạy **một** instance duy nhất. Hai instance cùng polling một tok
 
 ## Lưu ý về ảnh
 
-Bot lưu ảnh dưới dạng **external URL** trỏ tới file server của Telegram. Chạy được ngay không cần cấu hình gì, nhưng link Telegram có thể hết hạn — ảnh cũ trong Notion sẽ hỏng.
+Bot tải ảnh từ Telegram về rồi upload thẳng lên Notion (File Upload API) — ảnh nằm hẳn trong Notion, không hết hạn. Workspace Notion free giới hạn 5 MB/ảnh; ảnh lớn hơn bị bỏ qua và bot báo lại.
 
-Nếu cần ảnh vĩnh viễn, chọn một trong hai:
+Khi tạo GitHub issue, ảnh được commit vào branch `bug-assets` của repo (`bug-assets/BUG-12/...`) và nhúng vào issue. Repo private thì chỉ người có quyền vào repo xem được.
 
-1. **Notion File Upload API** — tải ảnh từ Telegram về, `POST /v1/file_uploads` rồi đính vào block. Ảnh nằm hẳn trong Notion.
-2. **Trung chuyển qua S3 / Cloudflare R2 / Imgur** — upload lên đó rồi nhét URL vĩnh viễn vào Notion.
-
-Chỗ cần sửa: hàm `_photo_url()` trong `bot.py` và phần `image_urls` trong `notion_client.py`.
-
-Nên quyết sớm — để lâu mới đổi thì ảnh cũ mất hết.
+**Bug cũ** (trước bản này) lưu ảnh dạng link Telegram — link đó chứa token bot và hết hạn sau một thời gian. Sau khi cập nhật, nên **revoke token bot** (BotFather → `/revoke`) rồi điền token mới vào `.env`.
 
 ## Thêm version mới
 
@@ -230,9 +257,14 @@ Khi ra build mới (vd v1.3):
 ```
 vltk-bot/
 ├── bot.py             # handler Telegram: lệnh group, phiên chat riêng, nút bấm
-├── notion_client.py   # gọi Notion API, format dữ liệu
+├── notion_client.py   # gọi Notion API, upload ảnh, format dữ liệu
+├── issue_pipeline.py  # Notion → LLM → ảnh → GitHub issue → ghi ngược Notion
+├── llm_client.py      # gọi LLM OpenAI-compatible (Qwen/DeepSeek), parse JSON
+├── github_client.py   # tạo issue, commit ảnh vào branch bug-assets
+├── issue_template.py  # dựng markdown issue theo template
+├── issue_models.py    # dataclass dùng chung
 ├── config.py          # biến môi trường, tên property, danh sách option
-├── tests/             # pytest cho phần parse tham số lệnh (python -m pytest tests)
+├── tests/             # pytest (python -m pytest tests)
 ├── requirements.txt
 ├── .env.example
 └── README.md
