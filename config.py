@@ -1,5 +1,6 @@
 """Cấu hình bot — đọc từ biến môi trường (.env)."""
 import os
+import re
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -118,9 +119,18 @@ LLM_API_KEY = os.getenv("LLM_API_KEY", "").strip()
 LLM_MODEL = os.getenv("LLM_MODEL", "").strip()
 
 # ---- GitHub issue cho AI agent ----
+def normalize_github_repo(raw: str) -> str:
+    """'https://github.com/owner/repo.git', 'git@github.com:owner/repo.git' → 'owner/repo'."""
+    repo = (raw or "").strip()
+    repo = re.sub(r"^(?:git@github\.com:|(?:https?://)?(?:www\.)?github\.com/)", "", repo)
+    repo = repo.rstrip("/")
+    return repo[:-4] if repo.endswith(".git") else repo
+
+
 # Token fine-grained, chỉ 1 repo, quyền Issues: write + Contents: write.
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "").strip()
-GITHUB_REPO = os.getenv("GITHUB_REPO", "").strip()          # owner/repo
+# owner/repo — dán nguyên URL repo cũng được, tự quy về owner/repo
+GITHUB_REPO = normalize_github_repo(os.getenv("GITHUB_REPO", ""))
 GITHUB_LABELS = [
     x.strip() for x in os.getenv("GITHUB_LABELS", "bug").split(",") if x.strip()
 ]

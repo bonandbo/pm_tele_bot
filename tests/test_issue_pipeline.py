@@ -37,6 +37,12 @@ def test_bug_from_page_existing_issue():
     assert bug.github_issue == ISSUE_URL
 
 
+def test_bug_from_page_without_bug_id_is_refused():
+    """Cột Bug ID bị đổi tên/xoá → bug_id '?' → issue '[?]' và path ảnh 'bug-assets/?/..' (GitHub 422)."""
+    with pytest.raises(ip.PipelineError, match="Bug ID"):
+        ip.bug_from_page(bug_page(id=None), "", "", [])
+
+
 def test_ext_from_content_type_then_url():
     assert ip._ext("https://s3/x", "image/png") == ".png"
     assert ip._ext("https://s3/x", "image/jpeg; charset=binary") == ".jpg"

@@ -36,11 +36,15 @@ def bug_from_page(
     page: dict, description: str, steps: str, images: list[tuple[str, str]]
 ) -> BugInput:
     p = config.BUG_PROPS
+    bug_id = nc.get_prop(page, p["id"])
+    if not bug_id:
+        # Cột ID bị đổi tên/xoá: không có BUG-ID thì issue thành "[?]" và path ảnh hỏng
+        raise PipelineError(f"Notion không đọc được cột '{p['id']}' (kiểu ID) trong Bug Tracker")
     level_raw = nc.get_prop(page, p["level"])
     level: Optional[int] = int(float(level_raw)) if level_raw else None
     return BugInput(
         page_id=page["id"],
-        bug_id=nc.get_short_id(page, p["id"]),
+        bug_id=bug_id,
         notion_url=nc.page_url(page["id"]),
         title=nc.get_title(page, p["title"]),
         description=description,

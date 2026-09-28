@@ -96,3 +96,17 @@ def test_put_asset_422_without_existing_file_raises(monkeypatch):
     _setup(monkeypatch, handler)
     with pytest.raises(github_client.GitHubError, match="422"):
         asyncio.run(github_client.put_asset("bug-assets/BUG-1/a.jpg", b"img", "m"))
+
+
+def test_normalize_github_repo_accepts_url_forms():
+    """Dán nguyên URL repo vào GITHUB_REPO từng gây 404 — phải tự quy về owner/repo."""
+    for raw in (
+        "KiemMong/kt-bugs",
+        " KiemMong/kt-bugs ",
+        "https://github.com/KiemMong/kt-bugs.git",
+        "https://github.com/KiemMong/kt-bugs/",
+        "github.com/KiemMong/kt-bugs",
+        "git@github.com:KiemMong/kt-bugs.git",
+    ):
+        assert config.normalize_github_repo(raw) == "KiemMong/kt-bugs", raw
+    assert config.normalize_github_repo("") == ""
