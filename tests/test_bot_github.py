@@ -54,3 +54,45 @@ def test_conversation_has_waiting_state_and_nonblocking_slow_handlers():
     for h in handlers:
         if h.callback in slow:
             assert h.block is False, h.callback.__name__
+
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+from notion_fixtures import bug_page, url_prop
+
+
+def _urls(kb):
+    return [b.url for row in kb.inline_keyboard for b in row if b.url]
+
+
+def test_bug_card_buttons():
+    issue = "https://github.com/t/g/issues/34"
+    clarify = "https://t.me/vltk_bot?start=clarify_12"
+
+    _, kb = bot._bug_card(bug_page())
+    assert issue not in _urls(kb) and clarify not in _urls(kb)
+
+    _, kb = bot._bug_card(bug_page(github_issue=url_prop(issue)))
+    assert issue in _urls(kb)
+
+    _, kb = bot._bug_card(bug_page(), clarify_url=clarify)
+    assert clarify in _urls(kb)
+
+    # Đã có issue thì không hiện nút Bổ sung nữa
+    _, kb = bot._bug_card(bug_page(github_issue=url_prop(issue)), clarify_url=clarify)
+    assert issue in _urls(kb) and clarify not in _urls(kb)
+
+
+def test_clarify_button_url_found():
+    clarify = "https://t.me/vltk_bot?start=clarify_12"
+    markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🟠 Cao", callback_data="sv|x|1")],
+        [InlineKeyboardButton("✍️ Bổ sung cho GitHub issue", url=clarify)],
+    ])
+    assert bot._clarify_button_url(markup) == clarify
+
+
+def test_clarify_button_url_absent():
+    assert bot._clarify_button_url(None) is None
+    markup = InlineKeyboardMarkup([[InlineKeyboardButton("📄 Notion", url="https://notion.so/x")]])
+    assert bot._clarify_button_url(markup) is None

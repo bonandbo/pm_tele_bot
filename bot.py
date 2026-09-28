@@ -215,7 +215,7 @@ async def _post_to_origin(
 
 # ================================================================ thẻ hiển thị
 
-def _bug_card(page: dict) -> tuple[str, InlineKeyboardMarkup]:
+def _bug_card(page: dict, clarify_url: Optional[str] = None) -> tuple[str, InlineKeyboardMarkup]:
     p = config.BUG_PROPS
     pid = _short(page["id"])
     short_id = nc.get_short_id(page, p["id"])
@@ -225,6 +225,7 @@ def _bug_card(page: dict) -> tuple[str, InlineKeyboardMarkup]:
     ver = nc.get_prop(page, p["version_found"])
     mod = nc.get_prop(page, p["module"])
     reporter = nc.get_prop(page, p["reporter"])
+    gh_url = nc.get_prop(page, p["github_issue"])
 
     meta = []
     if status:
@@ -255,8 +256,24 @@ def _bug_card(page: dict) -> tuple[str, InlineKeyboardMarkup]:
         ])
     if not mod:
         rows.append([InlineKeyboardButton("🧩 Chọn module", callback_data=f"mx|{pid}|0")])
-    rows.append([InlineKeyboardButton("📄 Mở trong Notion", url=nc.page_url(page["id"]))])
+    links = [InlineKeyboardButton("📄 Mở trong Notion", url=nc.page_url(page["id"]))]
+    if gh_url:
+        links.append(InlineKeyboardButton(f"🐙 GitHub #{_issue_number(gh_url)}", url=gh_url))
+    rows.append(links)
+    if clarify_url and not gh_url:
+        rows.append([InlineKeyboardButton("✍️ Bổ sung cho GitHub issue", url=clarify_url)])
     return text, InlineKeyboardMarkup(rows)
+
+
+def _clarify_button_url(markup: Optional[InlineKeyboardMarkup]) -> Optional[str]:
+    """URL nút "Bổ sung cho GitHub issue" đang có trên thẻ, để vẽ lại thẻ không làm mất nó."""
+    if not markup:
+        return None
+    for row in markup.inline_keyboard:
+        for button in row:
+            if button.url and "?start=clarify_" in button.url:
+                return button.url
+    return None
 
 
 def _feature_card(page: dict) -> tuple[str, InlineKeyboardMarkup]:
@@ -306,7 +323,8 @@ HELP_GROUP = (
     "/fixed BUG-44 v1.3 — đã fix ở version đó (→ Đã fix)\n"
     "/confirmed BUG-44 [v1.3] — QA xác nhận (→ Confirmed)\n"
     "/reopened BUG-44 lý do — vẫn lỗi, mở lại (→ Open)\n"
-    "/status BUG-12 — chọn trạng thái bất kỳ."
+    "/status BUG-12 — chọn trạng thái bất kỳ.\n"
+    "/issue BUG-12 — tạo GitHub issue cho bug (nếu lần trước lỗi / chưa bổ sung)."
 )
 
 HELP_PRIVATE = (
@@ -318,6 +336,7 @@ HELP_PRIVATE = (
     "🔄 /status &lt;ID&gt; — đổi trạng thái (admin)\n"
     "🔨 /fixbug BUG-44 · 🎉 /fixed BUG-44 v1.3\n"
     "☑️ /confirmed BUG-44 · 🔁 /reopened BUG-44 lý do\n"
+    "🐙 /issue BUG-44 — tạo GitHub issue (admin)\n"
     "👤 /me — những gì mình đã gửi\n"
     "❌ /huy — huỷ thao tác đang làm\n\n"
     "Trong group có thể báo nhanh một dòng:\n"
@@ -389,11 +408,40 @@ async def quick_bug(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     hint = "" if images else "\n\n<i>Bấm nút bên dưới để bổ sung thông tin.</i>"
     if too_big:
         hint += TOO_BIG_NOTE
-    await update.message.reply_text(
+    card = await update.message.reply_text(
         f"✅ Đã ghi nhận\n\n{text}{hint}",
         parse_mode=ParseMode.HTML,
         reply_markup=kb,
     )
+    if ip.enabled():
+        bug_id = nc.get_short_id(page, config.BUG_PROPS["id"])
+        context.application.create_task(
+            _quick_github(context, card, page["id"], bug_id), update=update
+        )
+
+
+async def _quick_github(context: ContextTypes.DEFAULT_TYPE, card, page_id: str, bug_id: str) -> None:
+    """Chạy nền sau khi báo nhanh trong group: đủ rõ → tạo issue; chưa rõ → gắn nút Bổ sung."""
+    clarify = None
+    try:
+        bug = await ip.load_bug(page_id)
+        d = await ip.draft(bug, [], final=False)
+        if d.status == "ready":
+            await ip.publish(bug, d.issue)
+        else:
+            clarify = _clarify_url(bug.bug_id)
+        fresh = await nc.get_page(page_id)
+    except ip.PipelineError as exc:
+        await card.reply_text(_fail_text(bug_id, exc), parse_mode=ParseMode.HTML)
+        return
+    except Exception:
+        log.exception("Luồng GitHub cho %s thất bại", bug_id)
+        return
+    _, kb = _bug_card(fresh, clarify_url=clarify)
+    try:
+        await card.edit_reply_markup(reply_markup=kb)
+    except Exception:
+        log.warning("Không sửa được thẻ bug %s", bug_id)
 
 
 async def quick_feature(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -445,6 +493,7 @@ async def on_field_click(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     query = update.callback_query
     kind, pid, idx = query.data.split("|")
     p = config.BUG_PROPS
+    clarify = _clarify_button_url(query.message.reply_markup)
 
     # Mở bảng chọn module
     if kind == "mx":
@@ -455,12 +504,14 @@ async def on_field_click(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             for j in range(0, len(config.MODULES), 2)
         ]
         rows.append([InlineKeyboardButton("↩️ Bỏ qua", callback_data=f"mn|{pid}|0")])
+        if clarify:
+            rows.append([InlineKeyboardButton("✍️ Bổ sung cho GitHub issue", url=clarify)])
         await query.edit_message_reply_markup(InlineKeyboardMarkup(rows))
         return
 
     if kind == "mn":
         page = await nc.get_page(pid)
-        text, kb = _bug_card(page)
+        text, kb = _bug_card(page, clarify_url=clarify)
         await query.answer()
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
         return
@@ -492,7 +543,7 @@ async def on_field_click(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         log.exception("Ghi lịch sử sửa field thất bại")
 
     await query.answer(f"Đã đặt: {value}")
-    text, kb = _bug_card(page)
+    text, kb = _bug_card(page, clarify_url=clarify)
     await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
 
@@ -1339,6 +1390,47 @@ async def cmd_reopened(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 # ================================================================ /me, /id
 
+async def cmd_issue(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/issue BUG-12 — tạo GitHub issue ngay, không hỏi lại (admin)."""
+    if not await _guard_group(update):
+        return
+    if not _is_admin(update):
+        await update.message.reply_text("Chỉ admin mới tạo được GitHub issue bằng lệnh.")
+        return
+    bug_id, _ = _parse_bug_args(context.args or [])
+    if not bug_id:
+        await update.message.reply_text(
+            "Cú pháp: <code>/issue BUG-44</code>", parse_mode=ParseMode.HTML
+        )
+        return
+    if not ip.enabled():
+        await update.message.reply_text(
+            "GitHub issue chưa được cấu hình (thiếu LLM_* / GITHUB_* trong .env)."
+        )
+        return
+    page = await nc.find_by_short_id(config.BUG_DB_ID, config.BUG_PROPS["id"], bug_id)
+    if not page:
+        await update.message.reply_text(f"Không tìm thấy {bug_id}.")
+        return
+
+    await update.message.chat.send_action("typing")
+    try:
+        bug = await ip.load_bug(page["id"])
+        if bug.github_issue:
+            await update.message.reply_text(
+                f"{bug_id} đã có GitHub issue.", reply_markup=_issue_kb(bug.github_issue)
+            )
+            return
+        d = await ip.draft(bug, [], final=True)
+        url = await ip.publish(bug, d.issue)
+    except ip.PipelineError as exc:
+        await update.message.reply_text(_fail_text(bug_id, exc), parse_mode=ParseMode.HTML)
+        return
+    await update.message.reply_text(
+        f"🐙 Đã tạo GitHub issue #{_issue_number(url)} cho {bug_id}.", reply_markup=_issue_kb(url)
+    )
+
+
 async def cmd_me(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _guard_group(update):
         return
@@ -1406,6 +1498,7 @@ async def _post_init(app: Application) -> None:
         BotCommand("fixed", "Đã fix: /fixed BUG-44 v1.3"),
         BotCommand("confirmed", "QA xác nhận: /confirmed BUG-44"),
         BotCommand("reopened", "Mở lại: /reopened BUG-44 lý do"),
+        BotCommand("issue", "Tạo GitHub issue: /issue BUG-44"),
         BotCommand("me", "Những gì mình đã gửi"),
         BotCommand("help", "Hướng dẫn"),
     ]
@@ -1494,6 +1587,7 @@ def main() -> None:
     app.add_handler(CommandHandler("fixed", cmd_fixed))
     app.add_handler(CommandHandler("confirmed", cmd_confirmed))
     app.add_handler(CommandHandler("reopened", cmd_reopened))
+    app.add_handler(CommandHandler("issue", cmd_issue, block=False))
     app.add_handler(CommandHandler("me", cmd_me))
     app.add_handler(CommandHandler("id", cmd_id))
     app.add_handler(CallbackQueryHandler(on_status_click, pattern=r"^st\|"))
