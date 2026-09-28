@@ -119,20 +119,43 @@ def _normalize_version(raw: str) -> Optional[str]:
     return f"v{v}"
 
 
-async def _photo_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Optional[str]:
-    """Lấy URL ảnh từ chính tin nhắn, hoặc từ tin nhắn được reply."""
+# Workspace Notion free giới hạn 5 MB/file
+MAX_IMAGE_BYTES = 5 * 1024 * 1024
+TOO_BIG_NOTE = "\n\n<i>⚠️ Ảnh lớn hơn 5 MB nên không đính kèm.</i>"
+
+
+def _too_big(size: Optional[int]) -> bool:
+    return bool(size) and size > MAX_IMAGE_BYTES
+
+
+async def _photo_file(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> tuple[Optional[nc.Image], bool]:
+    """Tải ảnh từ chính tin nhắn, hoặc từ tin nhắn được reply. Trả (ảnh, quá_lớn).
+
+    Tải về bytes để upload lên Notion — không dùng File.file_path vì URL đó chứa token bot.
+    """
     for msg in (update.message, update.message.reply_to_message):
         if not msg:
             continue
-        file_id = None
         if msg.photo:
-            file_id = msg.photo[-1].file_id
+            ph = msg.photo[-1]
+            file_id, size = ph.file_id, ph.file_size
+            filename, content_type = f"{ph.file_unique_id}.jpg", "image/jpeg"
         elif msg.document and (msg.document.mime_type or "").startswith("image/"):
-            file_id = msg.document.file_id
-        if file_id:
-            f = await context.bot.get_file(file_id)
-            return f.file_path
-    return None
+            doc = msg.document
+            file_id, size = doc.file_id, doc.file_size
+            filename, content_type = doc.file_name or f"{doc.file_unique_id}.jpg", doc.mime_type
+        else:
+            continue
+        if _too_big(size):
+            return None, True
+        f = await context.bot.get_file(file_id)
+        data = bytes(await f.download_as_bytearray())
+        if _too_big(len(data)):
+            return None, True
+        return (data, filename, content_type), False
+    return None, False
 
 
 async def _guard_group(update: Update) -> bool:
@@ -331,10 +354,8 @@ async def quick_bug(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     title, desc = _split_args(raw)
-    urls = []
-    url = await _photo_url(update, context)
-    if url:
-        urls.append(url)
+    photo, too_big = await _photo_file(update, context)
+    images = [photo] if photo else []
 
     await update.message.chat.send_action("typing")
     try:
@@ -343,7 +364,7 @@ async def quick_bug(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             description=desc,
             reporter=_reporter_name(update),
             telegram_id=str(update.effective_chat.id),
-            image_urls=urls,
+            images=images,
         )
     except Exception as exc:
         log.exception("Tạo bug thất bại")
@@ -351,7 +372,9 @@ async def quick_bug(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     text, kb = _bug_card(page)
-    hint = "" if urls else "\n\n<i>Bấm nút bên dưới để bổ sung thông tin.</i>"
+    hint = "" if images else "\n\n<i>Bấm nút bên dưới để bổ sung thông tin.</i>"
+    if too_big:
+        hint += TOO_BIG_NOTE
     await update.message.reply_text(
         f"✅ Đã ghi nhận\n\n{text}{hint}",
         parse_mode=ParseMode.HTML,
@@ -377,10 +400,8 @@ async def quick_feature(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     title, desc = _split_args(raw)
-    urls = []
-    url = await _photo_url(update, context)
-    if url:
-        urls.append(url)
+    photo, too_big = await _photo_file(update, context)
+    images = [photo] if photo else []
 
     await update.message.chat.send_action("typing")
     try:
@@ -389,7 +410,7 @@ async def quick_feature(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             description=desc,
             reporter=_reporter_name(update),
             telegram_id=str(update.effective_chat.id),
-            image_urls=urls,
+            images=images,
         )
     except Exception as exc:
         log.exception("Tạo feature thất bại")
@@ -398,7 +419,7 @@ async def quick_feature(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     text, kb = _feature_card(page)
     await update.message.reply_text(
-        f"✅ Đã ghi nhận\n\n{text}",
+        f"✅ Đã ghi nhận\n\n{text}" + (TOO_BIG_NOTE if too_big else ""),
         parse_mode=ParseMode.HTML,
         reply_markup=kb,
     )
@@ -551,10 +572,8 @@ async def bug_module(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 
 async def bug_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    urls = []
-    url = await _photo_url(update, context)
-    if url:
-        urls.append(url)
+    photo, too_big = await _photo_file(update, context)
+    images = [photo] if photo else []
 
     d = context.user_data
     await update.message.reply_text("Đang lưu vào Notion...", reply_markup=ReplyKeyboardRemove())
@@ -569,7 +588,7 @@ async def bug_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             modules=d.get("modules"),
             reporter=_reporter_name(update),
             telegram_id=str(update.effective_chat.id),
-            image_urls=urls,
+            images=images,
         )
     except Exception as exc:
         log.exception("Tạo bug thất bại")
@@ -581,7 +600,7 @@ async def bug_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     origin = d.get("origin_chat")
     group_name = await _post_to_origin(context, origin, f"🐛 <b>Bug mới</b>\n\n{text}", kb)
 
-    confirm = f"✅ Đã ghi nhận\n\n{text}"
+    confirm = f"✅ Đã ghi nhận\n\n{text}" + (TOO_BIG_NOTE if too_big else "")
     if group_name:
         confirm += f"\n\n<i>Đã đăng vào group {html.escape(group_name)}.</i>"
     await update.message.reply_text(confirm, parse_mode=ParseMode.HTML, reply_markup=kb)
@@ -651,10 +670,8 @@ async def feat_effort(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 
 
 async def feat_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    urls = []
-    url = await _photo_url(update, context)
-    if url:
-        urls.append(url)
+    photo, too_big = await _photo_file(update, context)
+    images = [photo] if photo else []
 
     d = context.user_data
     await update.message.reply_text("Đang lưu vào Notion...", reply_markup=ReplyKeyboardRemove())
@@ -667,7 +684,7 @@ async def feat_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             effort=d.get("effort"),
             reporter=_reporter_name(update),
             telegram_id=str(update.effective_chat.id),
-            image_urls=urls,
+            images=images,
         )
     except Exception as exc:
         log.exception("Tạo feature thất bại")
@@ -679,7 +696,7 @@ async def feat_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     origin = d.get("origin_chat")
     group_name = await _post_to_origin(context, origin, f"💡 <b>Feature mới</b>\n\n{text}", kb)
 
-    confirm = f"✅ Đã ghi nhận\n\n{text}"
+    confirm = f"✅ Đã ghi nhận\n\n{text}" + (TOO_BIG_NOTE if too_big else "")
     if group_name:
         confirm += f"\n\n<i>Đã đăng vào group {html.escape(group_name)}.</i>"
     await update.message.reply_text(confirm, parse_mode=ParseMode.HTML, reply_markup=kb)
