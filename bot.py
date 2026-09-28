@@ -40,12 +40,14 @@ from telegram.ext import (
     ContextTypes,
     ConversationHandler,
     MessageHandler,
+    TypeHandler,
     filters,
 )
 from telegram.error import NetworkError, TimedOut
 
 import config
 import notion_client as nc
+import issue_pipeline as ip
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -494,6 +496,165 @@ async def on_field_click(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
 
+# ================================================================ GitHub issue (LLM)
+
+_GH_KEYS = ("gh_bug", "gh_draft", "gh_questions", "gh_rounds", "gh_qa")
+
+
+def _issue_number(url: str) -> str:
+    return url.rstrip("/").rsplit("/", 1)[-1]
+
+
+def _issue_kb(url: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🐙 Mở GitHub issue", url=url)]])
+
+
+def _fail_text(bug_id: str, exc: Exception) -> str:
+    return (
+        f"⚠️ Chưa tạo được GitHub issue: {html.escape(str(exc))}.\n"
+        f"Bug đã lưu Notion — admin chạy <code>/issue {html.escape(bug_id)}</code>."
+    )
+
+
+def _clarify_payload(bug_id: str) -> str:
+    return f"clarify_{bug_id.split('-')[-1]}"
+
+
+def _clarify_url(bug_id: str) -> str:
+    return f"https://t.me/{BOT_USERNAME}?start={_clarify_payload(bug_id)}"
+
+
+def _clear_gh(context: ContextTypes.DEFAULT_TYPE) -> None:
+    for key in _GH_KEYS:
+        context.user_data.pop(key, None)
+
+
+async def _gh_publish(message, context: ContextTypes.DEFAULT_TYPE, bug, fields) -> int:
+    try:
+        url = await ip.publish(bug, fields)
+    except ip.PipelineError as exc:
+        await message.reply_text(_fail_text(bug.bug_id, exc), parse_mode=ParseMode.HTML)
+    else:
+        await message.reply_text(
+            f"🐙 Đã tạo GitHub issue #{_issue_number(url)} cho {bug.bug_id}.",
+            reply_markup=_issue_kb(url),
+        )
+    _clear_gh(context)
+    return ConversationHandler.END
+
+
+async def _gh_step(message, context: ContextTypes.DEFAULT_TYPE, bug, final: bool) -> int:
+    """Một vòng LLM: đủ rõ → tạo issue; chưa rõ → gửi câu hỏi, chờ ở BUG_CLARIFY."""
+    ud = context.user_data
+    await message.chat.send_action("typing")
+    try:
+        d = await ip.draft(bug, ud.get("gh_qa", []), final)
+    except ip.PipelineError as exc:
+        await message.reply_text(_fail_text(bug.bug_id, exc), parse_mode=ParseMode.HTML)
+        _clear_gh(context)
+        return ConversationHandler.END
+
+    if d.status == "ready":
+        return await _gh_publish(message, context, bug, d.issue)
+
+    ud["gh_bug"] = bug
+    ud["gh_draft"] = d
+    ud["gh_questions"] = d.questions
+    ud["gh_rounds"] = ud.get("gh_rounds", 0) + 1
+    questions = "\n".join(f"{i}. {html.escape(q)}" for i, q in enumerate(d.questions, 1))
+    await message.reply_text(
+        f"🤔 Để tạo GitHub issue cho <b>{bug.bug_id}</b>, cần làm rõ thêm:\n\n{questions}\n\n"
+        "<i>Trả lời trong 1 tin nhắn, hoặc /boqua để tạo issue với thông tin hiện có.</i>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    return BUG_CLARIFY
+
+
+async def _gh_begin(message, context: ContextTypes.DEFAULT_TYPE, page_id: str) -> int:
+    """Bắt đầu tạo issue cho 1 bug (vừa lưu, hoặc mở từ nút Bổ sung)."""
+    _clear_gh(context)
+    await message.reply_text("⏳ Đang soạn GitHub issue…")
+    try:
+        bug = await ip.load_bug(page_id)
+    except ip.PipelineError as exc:
+        await message.reply_text(
+            f"⚠️ Chưa tạo được GitHub issue: {html.escape(str(exc))}.", parse_mode=ParseMode.HTML
+        )
+        return ConversationHandler.END
+    if bug.github_issue:
+        await message.reply_text(
+            f"{bug.bug_id} đã có GitHub issue.", reply_markup=_issue_kb(bug.github_issue)
+        )
+        return ConversationHandler.END
+    return await _gh_step(message, context, bug, final=False)
+
+
+async def bug_clarify(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    ud = context.user_data
+    bug = ud.get("gh_bug")
+    if not bug:
+        return ConversationHandler.END
+    answer = update.message.text.strip()
+    questions = "\n".join(ud.get("gh_questions", []))
+    ud.setdefault("gh_qa", []).append((questions, answer))
+    try:
+        await nc.log_history(bug.page_id, f"Bổ sung cho GitHub: {questions} → {answer}")
+    except Exception:
+        log.exception("Ghi lịch sử bổ sung GitHub thất bại")
+    final = ud.get("gh_rounds", 0) >= ip.MAX_CLARIFY_ROUNDS
+    return await _gh_step(update.message, context, bug, final)
+
+
+async def bug_clarify_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """/boqua — tạo issue luôn từ bản nháp hiện có."""
+    ud = context.user_data
+    bug, d = ud.get("gh_bug"), ud.get("gh_draft")
+    if not bug or not d:
+        return ConversationHandler.END
+    return await _gh_publish(update.message, context, bug, d.issue)
+
+
+async def on_conv_timeout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Hết 10 phút: nếu đang chờ bổ sung cho GitHub thì tạo issue từ bản nháp, không để mất."""
+    ud = context.user_data
+    bug, d = ud.get("gh_bug"), ud.get("gh_draft")
+    if bug and d:
+        try:
+            url = await ip.publish(bug, d.issue)
+            text = (f"⏰ Hết thời gian chờ — đã tạo GitHub issue #{_issue_number(url)} "
+                    f"cho {bug.bug_id} với thông tin hiện có.")
+            kb = _issue_kb(url)
+        except ip.PipelineError as exc:
+            text, kb = _fail_text(bug.bug_id, exc), None
+        try:
+            await context.bot.send_message(
+                update.effective_chat.id, text, parse_mode=ParseMode.HTML, reply_markup=kb
+            )
+        except Exception:
+            log.warning("Không nhắn được kết quả timeout cho %s", update.effective_chat.id)
+    ud.clear()
+
+
+async def on_busy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Tin nhắn đến trong lúc bot còn xử lý bước trước (state WAITING)."""
+    await update.message.reply_text("⏳ Bot đang xử lý tin trước, chờ chút rồi gửi lại nhé.")
+
+
+async def _clarify_entry(update: Update, context: ContextTypes.DEFAULT_TYPE, num: str) -> int:
+    """Deep-link clarify_<số> từ nút "Bổ sung cho GitHub issue" trong group."""
+    if not ip.enabled():
+        await update.message.reply_text("GitHub issue chưa được cấu hình.")
+        return ConversationHandler.END
+    bug_id = f"BUG-{num}"
+    page = await nc.find_by_short_id(config.BUG_DB_ID, config.BUG_PROPS["id"], bug_id)
+    if not page:
+        await update.message.reply_text(f"Không tìm thấy {bug_id}.")
+        return ConversationHandler.END
+    context.user_data.clear()
+    return await _gh_begin(update.message, context, page["id"])
+
+
 # ================================================================ hội thoại đầy đủ (chat riêng)
 
 async def start_or_deeplink(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -504,6 +665,8 @@ async def start_or_deeplink(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     """
     payload = context.args[0].lower() if context.args else ""
     action, _, origin = payload.partition("_")
+    if action == "clarify" and origin.isdigit():
+        return await _clarify_entry(update, context, origin)
 
     origin_chat_id = None
     if origin.lstrip("-").isdigit():
@@ -669,6 +832,8 @@ async def bug_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             log.warning("Không gửi được thông báo tới ADMIN_CHAT_ID")
 
     context.user_data.clear()
+    if ip.enabled():
+        return await _gh_begin(update.message, context, page["id"])
     return ConversationHandler.END
 
 
@@ -1250,6 +1415,51 @@ async def _post_init(app: Application) -> None:
     await app.bot.set_my_commands(group_cmds, scope=BotCommandScopeAllGroupChats())
 
 
+def _build_conversation() -> ConversationHandler:
+    private = filters.ChatType.PRIVATE
+    text = private & filters.TEXT & ~filters.COMMAND
+    image = private & (filters.PHOTO | filters.Document.IMAGE | filters.TEXT) & ~filters.COMMAND
+
+    # Hội thoại đầy đủ — chỉ chạy trong chat riêng để không nuốt tin nhắn group.
+    # Handler chậm (gọi LLM/GitHub) đặt block=False để không chặn user khác; tin nhắn đến
+    # trong lúc chờ rơi vào state WAITING thay vì bị hiểu là câu trả lời của bước cũ.
+    return ConversationHandler(
+        entry_points=[
+            CommandHandler("start", start_or_deeplink, filters=private, block=False),
+            CommandHandler("bug", bug_start, filters=private),
+            CommandHandler("feature", feat_start, filters=private),
+        ],
+        states={
+            BUG_TITLE: [MessageHandler(text, bug_title)],
+            BUG_DESC: [MessageHandler(text, bug_desc)],
+            BUG_STEPS: [MessageHandler(text, bug_steps)],
+            BUG_CHAR: [MessageHandler(text, bug_char)],
+            BUG_LEVEL: [MessageHandler(text, bug_level)],
+            BUG_MAP: [MessageHandler(text, bug_map)],
+            BUG_SEVERITY: [MessageHandler(text, bug_severity)],
+            BUG_VERSION: [MessageHandler(text, bug_version)],
+            BUG_MODULE: [MessageHandler(text, bug_module)],
+            BUG_IMAGE: [MessageHandler(image, bug_image, block=False)],
+            BUG_CLARIFY: [
+                MessageHandler(text, bug_clarify, block=False),
+                CommandHandler("boqua", bug_clarify_skip, block=False),
+            ],
+            FEAT_TITLE: [MessageHandler(text, feat_title)],
+            FEAT_DESC: [MessageHandler(text, feat_desc)],
+            FEAT_IMPACT: [MessageHandler(text, feat_impact)],
+            FEAT_EFFORT: [MessageHandler(text, feat_effort)],
+            FEAT_IMAGE: [MessageHandler(image, feat_image)],
+            ConversationHandler.WAITING: [MessageHandler(private & ~filters.COMMAND, on_busy)],
+            ConversationHandler.TIMEOUT: [TypeHandler(Update, on_conv_timeout)],
+        },
+        fallbacks=[
+            CommandHandler("huy", cmd_cancel),
+            CommandHandler("cancel", cmd_cancel),
+        ],
+        conversation_timeout=600,
+    )
+
+
 def main() -> None:
     # Python 3.14 không còn tự tạo event loop — tạo thủ công cho PTB
     try:
@@ -1270,45 +1480,7 @@ def main() -> None:
         .build()
     )
 
-    private = filters.ChatType.PRIVATE
-
-    # Hội thoại đầy đủ — chỉ chạy trong chat riêng để không nuốt tin nhắn group
-    conv = ConversationHandler(
-        entry_points=[
-            CommandHandler("start", start_or_deeplink, filters=private),
-            CommandHandler("bug", bug_start, filters=private),
-            CommandHandler("feature", feat_start, filters=private),
-        ],
-        states={
-            BUG_TITLE: [MessageHandler(private & filters.TEXT & ~filters.COMMAND, bug_title)],
-            BUG_DESC: [MessageHandler(private & filters.TEXT & ~filters.COMMAND, bug_desc)],
-            BUG_STEPS: [MessageHandler(private & filters.TEXT & ~filters.COMMAND, bug_steps)],
-            BUG_CHAR: [MessageHandler(private & filters.TEXT & ~filters.COMMAND, bug_char)],
-            BUG_LEVEL: [MessageHandler(private & filters.TEXT & ~filters.COMMAND, bug_level)],
-            BUG_MAP: [MessageHandler(private & filters.TEXT & ~filters.COMMAND, bug_map)],
-            BUG_SEVERITY: [MessageHandler(private & filters.TEXT & ~filters.COMMAND, bug_severity)],
-            BUG_VERSION: [MessageHandler(private & filters.TEXT & ~filters.COMMAND, bug_version)],
-            BUG_MODULE: [MessageHandler(private & filters.TEXT & ~filters.COMMAND, bug_module)],
-            BUG_IMAGE: [MessageHandler(
-                private & (filters.PHOTO | filters.Document.IMAGE | filters.TEXT) & ~filters.COMMAND,
-                bug_image,
-            )],
-            FEAT_TITLE: [MessageHandler(private & filters.TEXT & ~filters.COMMAND, feat_title)],
-            FEAT_DESC: [MessageHandler(private & filters.TEXT & ~filters.COMMAND, feat_desc)],
-            FEAT_IMPACT: [MessageHandler(private & filters.TEXT & ~filters.COMMAND, feat_impact)],
-            FEAT_EFFORT: [MessageHandler(private & filters.TEXT & ~filters.COMMAND, feat_effort)],
-            FEAT_IMAGE: [MessageHandler(
-                private & (filters.PHOTO | filters.Document.IMAGE | filters.TEXT) & ~filters.COMMAND,
-                feat_image,
-            )],
-        },
-        fallbacks=[
-            CommandHandler("huy", cmd_cancel),
-            CommandHandler("cancel", cmd_cancel),
-        ],
-        conversation_timeout=600,
-    )
-    app.add_handler(conv)
+    app.add_handler(_build_conversation())
 
     group = filters.ChatType.GROUPS
     app.add_handler(CommandHandler("bug", quick_bug, filters=group))
