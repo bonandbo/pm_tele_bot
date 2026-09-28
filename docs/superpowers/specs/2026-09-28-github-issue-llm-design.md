@@ -39,7 +39,7 @@ Template gốc bỏ dòng "Máy". Tiêu đề issue: `[BUG-12] <title>`. Body:
 ## Triệu chứng
 <symptom>
 
-![BUG-12 ảnh 1](https://github.com/<owner>/<repo>/blob/<assets-branch>/bug-assets/BUG-12/<block8>.jpg?raw=true)
+![BUG-12 ảnh 1](https://github.com/<owner>/<repo>/blob/<assets-branch>/bug-assets/BUG-12/<block_id>.jpg?raw=true)
 
 ## Cách tái hiện
 1. <step>
@@ -76,7 +76,7 @@ Quy ước:
 
 `bot.py` chỉ lo Telegram I/O, gọi `issue_pipeline`.
 
-### Kiểu dữ liệu (dataclass trong `issue_pipeline.py` / `llm_client.py`)
+### Kiểu dữ liệu (dataclass trong `issue_models.py` — module riêng để `issue_template`, `llm_client`, `issue_pipeline` cùng import, không vòng)
 
 ```python
 @dataclass
@@ -92,8 +92,8 @@ class BugInput:          # đọc từ Notion
     modules: str
     character: str
     level: Optional[int]
-    map: str
-    image_urls: list[tuple[str, str]]   # (block_id, url tải được)
+    map_name: str
+    images: list[tuple[str, str]]       # (block_id, url tải được)
     github_issue: str    # URL đã có, "" nếu chưa
 
 @dataclass
@@ -123,7 +123,7 @@ class PipelineError(Exception)   # message thân thiện để bot hiện cho us
 
 `publish()`:
 1. Đọc lại page; cột `GitHub Issue` đã có → trả URL đó, không tạo mới.
-2. Với mỗi ảnh: tải bytes → `put_asset("bug-assets/<BUG-ID>/<block_id 8 ký tự>.<ext>")`. File đã tồn tại
+2. Với mỗi ảnh: tải bytes → `put_asset("bug-assets/<BUG-ID>/<block_id bỏ gạch>.<ext>")` (đủ 32 ký tự để không trùng). File đã tồn tại
    (GitHub trả 422) → coi như đã có, dùng lại đường dẫn. Lỗi khác → đánh dấu ảnh lỗi, tiếp tục.
 3. `render_title` + `render_body` → `create_issue`.
 4. `set_github_issue(page_id, url)` + `log_history(page_id, "Tạo GitHub issue #<n>")`.
@@ -163,9 +163,10 @@ class PipelineError(Exception)   # message thân thiện để bot hiện cho us
 - `_photo_url()` → `_photo_file()` trả `(bytes, filename, content_type)` qua `download_as_bytearray()`.
   Không còn đưa `file_path` (chứa token) vào Notion.
 - Ảnh > 5 MB (giới hạn Notion free) → bỏ ảnh, báo user "ảnh quá lớn, không đính kèm".
-- Builder thêm `.concurrent_updates(8)`: hiện PTB xử lý update tuần tự, một lần gọi LLM (vài–60 giây)
-  sẽ chặn bot với mọi người khác. `user_data` tách theo user nên ConversationHandler vẫn đúng,
-  chỉ rủi ro khi chính một user gửi 2 tin dồn dập — chấp nhận.
+- Không bật `concurrent_updates` (sẽ khiến tin nhắn gửi trong lúc chờ LLM bị hiểu nhầm là câu trả lời
+  của bước cũ → tạo bug trùng). Thay vào đó các handler chậm (`bug_image`, `bug_clarify`, `/boqua`,
+  `start_or_deeplink`, `/issue`) đặt `block=False` để không chặn user khác, và ConversationHandler có
+  state `ConversationHandler.WAITING` trả lời "⏳ Bot đang xử lý…" cho tin nhắn đến trong lúc chờ.
 
 Ghi chú khi implement: xác nhận File Upload API chạy với `Notion-Version: 2022-06-28` đang dùng;
 nếu không, chỉ các request file upload dùng version mới hơn.
