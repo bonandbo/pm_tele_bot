@@ -52,6 +52,10 @@ BUG_PROPS = {
     "module": "Module",
     "reporter": "Người báo cáo",
     "telegram_id": "Telegram ID",
+    "character": "Nhân vật",
+    "level": "Cấp",
+    "map": "Bản đồ",
+    "github_issue": "GitHub Issue",
 }
 
 FEATURE_PROPS = {

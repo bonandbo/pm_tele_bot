@@ -22,13 +22,19 @@ _sem = asyncio.Semaphore(3)
 # Trần số page kéo về khi query không giới hạn (limit=None) — tránh lặp vô tận.
 _MAX_QUERY = 500
 
+_TRANSPORT = None  # test gắn httpx.MockTransport
+
 
 async def _request(method: str, path: str, **kwargs) -> dict[str, Any]:
     url = f"{config.NOTION_API}{path}"
+    headers = dict(_HEADERS)
+    if "files" in kwargs:
+        # multipart: để httpx tự đặt Content-Type kèm boundary
+        headers.pop("Content-Type")
     async with _sem:
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=30, transport=_TRANSPORT) as client:
             for attempt in range(3):
-                resp = await client.request(method, url, headers=_HEADERS, **kwargs)
+                resp = await client.request(method, url, headers=headers, **kwargs)
                 if resp.status_code == 429:
                     wait = float(resp.headers.get("Retry-After", 1))
                     log.warning("Notion rate limit, chờ %.1fs", wait)
@@ -61,6 +67,10 @@ def _title(value: str) -> dict:
     return {"title": [{"text": {"content": value[:2000]}}]}
 
 
+def _number(value: Optional[int]) -> dict:
+    return {"number": value}
+
+
 def _plain(prop: Optional[dict]) -> str:
     """Đọc giá trị hiển thị của 1 property bất kỳ ra string."""
     if not prop:
@@ -78,6 +88,11 @@ def _plain(prop: Optional[dict]) -> str:
         prefix = uid.get("prefix") or ""
         num = uid.get("number")
         return f"{prefix}-{num}" if num is not None else ""
+    if t == "number":
+        n = prop.get("number")
+        return "" if n is None else str(n)
+    if t == "url":
+        return prop.get("url") or ""
     if t == "created_time":
         return prop.get("created_time", "")[:10]
     if t == "last_edited_time":
@@ -93,6 +108,42 @@ def bug_db_url() -> str:
     return page_url(config.BUG_DB_ID)
 
 
+# ---------------------------------------------------------------- upload ảnh
+
+# (data, filename, content_type)
+Image = tuple[bytes, str, str]
+
+
+async def upload_file(data: bytes, filename: str, content_type: str) -> str:
+    """Notion File Upload API (single part). Trả file_upload id để gắn vào block trong 1 giờ."""
+    created = await _request("POST", "/file_uploads", json={
+        "filename": filename, "content_type": content_type,
+    })
+    upload_id = created["id"]
+    await _request(
+        "POST", f"/file_uploads/{upload_id}/send",
+        files={"file": (filename, data, content_type)},
+    )
+    return upload_id
+
+
+async def _image_blocks(images: Optional[list[Image]]) -> list[dict]:
+    """Upload từng ảnh lên Notion. Ảnh lỗi bị bỏ qua — không làm hỏng việc tạo page."""
+    blocks = []
+    for data, filename, content_type in images or []:
+        try:
+            upload_id = await upload_file(data, filename, content_type)
+        except Exception:
+            log.exception("Upload ảnh lên Notion thất bại: %s", filename)
+            continue
+        blocks.append({
+            "object": "block",
+            "type": "image",
+            "image": {"type": "file_upload", "file_upload": {"id": upload_id}},
+        })
+    return blocks
+
+
 # ---------------------------------------------------------------- create
 
 async def create_bug(
@@ -106,7 +157,10 @@ async def create_bug(
     modules: Optional[list[str]] = None,
     reporter: str = "",
     telegram_id: str = "",
-    image_urls: Optional[list[str]] = None,
+    character: str = "",
+    level: Optional[int] = None,
+    map_name: str = "",
+    images: Optional[list[Image]] = None,
 ) -> dict[str, Any]:
     p = config.BUG_PROPS
     props = {
@@ -118,19 +172,17 @@ async def create_bug(
         p["module"]: _multi_select(modules),
         p["reporter"]: _rich_text(reporter),
         p["telegram_id"]: _rich_text(telegram_id),
+        p["character"]: _rich_text(character),
+        p["level"]: _number(level),
+        p["map"]: _rich_text(map_name),
     }
 
     children = _text_block("heading_2", "Mô tả") + _paragraphs(description)
     if steps:
         children += _text_block("heading_2", "Bước tái hiện") + _paragraphs(steps)
-    if image_urls:
-        children += _text_block("heading_2", "Ảnh / Video")
-        for url in image_urls:
-            children.append({
-                "object": "block",
-                "type": "image",
-                "image": {"type": "external", "external": {"url": url}},
-            })
+    image_blocks = await _image_blocks(images)
+    if image_blocks:
+        children += _text_block("heading_2", "Ảnh / Video") + image_blocks
     children += _text_block("heading_2", HISTORY_HEADING)
     children += _history_item(f"Tạo bug · Mới báo cáo · bởi {reporter or '?'}")
 
@@ -152,7 +204,7 @@ async def create_feature(
     modules: Optional[list[str]] = None,
     reporter: str = "",
     telegram_id: str = "",
-    image_urls: Optional[list[str]] = None,
+    images: Optional[list[Image]] = None,
 ) -> dict[str, Any]:
     p = config.FEATURE_PROPS
     props = {
@@ -167,14 +219,9 @@ async def create_feature(
     }
 
     children = _text_block("heading_2", "Mô tả / Lý do") + _paragraphs(description)
-    if image_urls:
-        children += _text_block("heading_2", "Tham khảo")
-        for url in image_urls:
-            children.append({
-                "object": "block",
-                "type": "image",
-                "image": {"type": "external", "external": {"url": url}},
-            })
+    image_blocks = await _image_blocks(images)
+    if image_blocks:
+        children += _text_block("heading_2", "Tham khảo") + image_blocks
 
     return await _request("POST", "/pages", json={
         "parent": {"database_id": config.FEATURE_DB_ID},
@@ -322,6 +369,13 @@ async def update_bug_status(
     return await _request("PATCH", f"/pages/{page_id}", json={"properties": props})
 
 
+async def set_github_issue(page_id: str, url: str) -> dict:
+    prop = config.BUG_PROPS["github_issue"]
+    return await _request("PATCH", f"/pages/{page_id}", json={
+        "properties": {prop: {"url": url}}
+    })
+
+
 async def add_comment(page_id: str, text: str) -> str:
     """Ghi comment lên page. Trả về 'comment' hoặc 'callout' tuỳ cách ghi được.
 
@@ -401,6 +455,53 @@ async def log_history(page_id: str, text: str) -> None:
         children += _text_block("heading_2", HISTORY_HEADING)
     children += _history_item(text)
     await _request("PATCH", f"/blocks/{page_id}/children", json={"children": children})
+
+
+# ---------------------------------------------------------------- đọc body bug
+
+_BODY_SECTIONS = {"Mô tả": "desc", "Bước tái hiện": "steps"}
+
+
+def _rich_plain(rich: list[dict]) -> str:
+    return "".join(x.get("plain_text", "") for x in rich or [])
+
+
+def parse_bug_blocks(blocks: list[dict]) -> tuple[str, str, list[tuple[str, str]]]:
+    """Block con của page bug → (mô tả, bước tái hiện, [(block_id, url ảnh)])."""
+    section = None
+    text: dict[str, list[str]] = {"desc": [], "steps": []}
+    images: list[tuple[str, str]] = []
+    for b in blocks:
+        t = b.get("type")
+        if t in ("heading_1", "heading_2", "heading_3"):
+            section = _BODY_SECTIONS.get(_rich_plain(b[t].get("rich_text")).strip())
+        elif t == "paragraph" and section:
+            text[section].append(_rich_plain(b["paragraph"].get("rich_text")))
+        elif t == "image":
+            img = b["image"]
+            kind = img.get("type")
+            url = (img.get(kind) or {}).get("url") if kind in ("file", "external") else None
+            if url:
+                images.append((b["id"], url))
+    return "\n".join(text["desc"]).strip(), "\n".join(text["steps"]).strip(), images
+
+
+async def _list_children(page_id: str) -> list[dict]:
+    blocks: list[dict] = []
+    cursor = None
+    while True:
+        params = {"page_size": 100}
+        if cursor:
+            params["start_cursor"] = cursor
+        data = await _request("GET", f"/blocks/{page_id}/children", params=params)
+        blocks.extend(data.get("results", []))
+        if not data.get("has_more"):
+            return blocks
+        cursor = data.get("next_cursor")
+
+
+async def read_bug_body(page_id: str) -> tuple[str, str, list[tuple[str, str]]]:
+    return parse_bug_blocks(await _list_children(page_id))
 
 
 # ---------------------------------------------------------------- format
