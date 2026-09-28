@@ -96,3 +96,61 @@ def test_clarify_button_url_absent():
     assert bot._clarify_button_url(None) is None
     markup = InlineKeyboardMarkup([[InlineKeyboardButton("📄 Notion", url="https://notion.so/x")]])
     assert bot._clarify_button_url(markup) is None
+
+
+# ---------------------------------------------------------------- lỗi mạng giữa luồng GitHub không được làm kẹt hội thoại
+
+import asyncio
+from types import SimpleNamespace
+
+from telegram.error import NetworkError
+from telegram.ext import ConversationHandler
+
+from issue_models import BugInput, Draft, IssueFields
+
+
+class _Msg:
+    """Message giả: reply_text / send_action ném NetworkError nếu được yêu cầu."""
+
+    def __init__(self, text="", fail=()):
+        self.text = text
+        self.fail = set(fail)
+        self.sent = []
+        self.chat = SimpleNamespace(send_action=self._send_action)
+
+    async def _send_action(self, *args, **kwargs):
+        if "send_action" in self.fail:
+            raise NetworkError("mạng chập chờn")
+
+    async def reply_text(self, text, **kwargs):
+        if "reply_text" in self.fail:
+            raise NetworkError("mạng chập chờn")
+        self.sent.append(text)
+
+
+def _gh_user_data():
+    bug = BugInput(page_id="page-1", bug_id="BUG-12", notion_url="u", title="T")
+    draft = Draft("need_info", ["Lỗi xảy ra lúc nào?"], IssueFields(title="T", symptom="S"))
+    return {"gh_bug": bug, "gh_draft": draft, "gh_questions": draft.questions, "gh_rounds": 1}
+
+
+def test_clarify_network_error_keeps_clarify_state(monkeypatch):
+    """Còn bản nháp → giữ BUG_CLARIFY để timeout vẫn tự tạo issue, không kẹt ở state cũ."""
+    async def no_history(pid, text):
+        pass
+    monkeypatch.setattr(bot.nc, "log_history", no_history)
+    update = SimpleNamespace(message=_Msg(text="lúc vào map", fail={"send_action"}))
+    context = SimpleNamespace(user_data=_gh_user_data())
+    assert asyncio.run(bot.bug_clarify(update, context)) == bot.BUG_CLARIFY
+
+
+def test_clarify_entry_network_error_ends_conversation(monkeypatch):
+    """Chưa có bản nháp → kết thúc hội thoại sạch sẽ thay vì kẹt."""
+    async def find(db, prop, short_id):
+        return {"id": "page-1"}
+    monkeypatch.setattr(bot.ip, "enabled", lambda: True)
+    monkeypatch.setattr(bot.nc, "find_by_short_id", find)
+    update = SimpleNamespace(message=_Msg(fail={"reply_text"}))
+    context = SimpleNamespace(user_data={"title": "cũ"})
+    assert asyncio.run(bot._gh_guard(context, bot._clarify_entry(update, context, "12"))) == ConversationHandler.END
+    assert "gh_bug" not in context.user_data

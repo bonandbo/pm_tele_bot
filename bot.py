@@ -580,6 +580,22 @@ def _clear_gh(context: ContextTypes.DEFAULT_TYPE) -> None:
         context.user_data.pop(key, None)
 
 
+async def _gh_guard(context: ContextTypes.DEFAULT_TYPE, coro) -> int:
+    """Lỗi bất ngờ (mạng Telegram…) trong luồng GitHub không được làm kẹt hội thoại.
+
+    Còn bản nháp → giữ BUG_CLARIFY để timeout vẫn tự tạo issue; chưa có → kết thúc.
+    """
+    try:
+        return await coro
+    except Exception:
+        log.exception("Luồng GitHub issue lỗi bất ngờ")
+        ud = context.user_data
+        if ud.get("gh_bug") and ud.get("gh_draft"):
+            return BUG_CLARIFY
+        _clear_gh(context)
+        return ConversationHandler.END
+
+
 async def _gh_publish(message, context: ContextTypes.DEFAULT_TYPE, bug, fields) -> int:
     try:
         url = await ip.publish(bug, fields)
@@ -654,7 +670,7 @@ async def bug_clarify(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     except Exception:
         log.exception("Ghi lịch sử bổ sung GitHub thất bại")
     final = ud.get("gh_rounds", 0) >= ip.MAX_CLARIFY_ROUNDS
-    return await _gh_step(update.message, context, bug, final)
+    return await _gh_guard(context, _gh_step(update.message, context, bug, final))
 
 
 async def bug_clarify_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -663,7 +679,7 @@ async def bug_clarify_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     bug, d = ud.get("gh_bug"), ud.get("gh_draft")
     if not bug or not d:
         return ConversationHandler.END
-    return await _gh_publish(update.message, context, bug, d.issue)
+    return await _gh_guard(context, _gh_publish(update.message, context, bug, d.issue))
 
 
 async def on_conv_timeout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -717,7 +733,7 @@ async def start_or_deeplink(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     payload = context.args[0].lower() if context.args else ""
     action, _, origin = payload.partition("_")
     if action == "clarify" and origin.isdigit():
-        return await _clarify_entry(update, context, origin)
+        return await _gh_guard(context, _clarify_entry(update, context, origin))
 
     origin_chat_id = None
     if origin.lstrip("-").isdigit():
@@ -884,7 +900,7 @@ async def bug_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     context.user_data.clear()
     if ip.enabled():
-        return await _gh_begin(update.message, context, page["id"])
+        return await _gh_guard(context, _gh_begin(update.message, context, page["id"]))
     return ConversationHandler.END
 
 
