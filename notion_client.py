@@ -34,7 +34,16 @@ async def _request(method: str, path: str, **kwargs) -> dict[str, Any]:
     async with _sem:
         async with httpx.AsyncClient(timeout=30, transport=_TRANSPORT) as client:
             for attempt in range(3):
-                resp = await client.request(method, url, headers=headers, **kwargs)
+                try:
+                    resp = await client.request(method, url, headers=headers, **kwargs)
+                except httpx.TransportError as exc:
+                    # Mất kết nối: chỉ thử lại GET (chỉ đọc). POST/PATCH có thể Notion đã xử lý rồi,
+                    # thử lại sẽ tạo bug trùng hoặc dòng lịch sử trùng.
+                    if method != "GET" or attempt == 2:
+                        raise
+                    log.warning("Notion ngắt kết nối (%s), thử lại GET %s", type(exc).__name__, path)
+                    await asyncio.sleep(1 + attempt)
+                    continue
                 if resp.status_code == 429:
                     wait = float(resp.headers.get("Retry-After", 1))
                     log.warning("Notion rate limit, chờ %.1fs", wait)

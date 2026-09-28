@@ -3,6 +3,7 @@ import asyncio
 import json
 
 import httpx
+import pytest
 
 import config
 import notion_client as nc
@@ -160,3 +161,46 @@ def test_read_bug_body_pages_through_children(monkeypatch):
 
     _mock(monkeypatch, handler)
     assert asyncio.run(nc.read_bug_body("p1")) == ("mô tả", "", [])
+
+
+# ---------------------------------------------------------------- mất kết nối giữa chừng
+
+def _flaky(monkeypatch, fail_times):
+    """Transport ném RemoteProtocolError `fail_times` lần đầu rồi trả 200. Trả list method đã gọi."""
+    calls = []
+
+    def handler(request):
+        calls.append(request.method)
+        if len(calls) <= fail_times:
+            raise httpx.RemoteProtocolError("Server disconnected without sending a response.", request=request)
+        return httpx.Response(200, json={"results": [], "has_more": False, "id": "p1"})
+
+    _mock(monkeypatch, handler)
+    monkeypatch.setattr(nc.asyncio, "sleep", _no_sleep)
+    return calls
+
+
+async def _no_sleep(*args, **kwargs):
+    pass
+
+
+def test_get_retries_after_disconnect(monkeypatch):
+    """BUG-107: Notion ngắt kết nối khi đọc body → luồng GitHub hỏng. GET chỉ đọc nên thử lại được."""
+    calls = _flaky(monkeypatch, fail_times=2)
+    assert asyncio.run(nc.read_bug_body("p1")) == ("", "", [])
+    assert calls == ["GET", "GET", "GET"]
+
+
+def test_get_gives_up_after_three_disconnects(monkeypatch):
+    calls = _flaky(monkeypatch, fail_times=3)
+    with pytest.raises(httpx.RemoteProtocolError):
+        asyncio.run(nc.read_bug_body("p1"))
+    assert calls == ["GET", "GET", "GET"]
+
+
+def test_post_is_not_retried_after_disconnect(monkeypatch):
+    """POST có thể Notion đã xử lý trước khi ngắt → thử lại sẽ tạo bug trùng."""
+    calls = _flaky(monkeypatch, fail_times=1)
+    with pytest.raises(httpx.RemoteProtocolError):
+        asyncio.run(nc.create_bug(title="T", description="D"))
+    assert calls == ["POST"]
