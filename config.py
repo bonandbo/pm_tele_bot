@@ -103,3 +103,12 @@ STATUS_EMOJI = {
 SEVERITY_EMOJI = {
     "Nghiêm trọng": "🔴", "Cao": "🟠", "Trung bình": "🟡", "Thấp": "⚪",
 }
+
+# ---- LLM (OpenAI-compatible: DashScope/Qwen, DeepSeek) — tạo GitHub issue ----
+# DashScope quốc tế: https://dashscope-intl.aliyuncs.com/compatible-mode/v1
+# DeepSeek:          https://api.deepseek.com
+LLM_BASE_URL = os.getenv(
+    "LLM_BASE_URL", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+).strip()
+LLM_API_KEY = os.getenv("LLM_API_KEY", "").strip()
+LLM_MODEL = os.getenv("LLM_MODEL", "").strip()
