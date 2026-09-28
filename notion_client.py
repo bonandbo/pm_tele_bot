@@ -172,10 +172,15 @@ async def create_bug(
         p["module"]: _multi_select(modules),
         p["reporter"]: _rich_text(reporter),
         p["telegram_id"]: _rich_text(telegram_id),
-        p["character"]: _rich_text(character),
-        p["level"]: _number(level),
-        p["map"]: _rich_text(map_name),
     }
+    # Cột mới chỉ gửi khi có giá trị: DB chưa thêm cột thì bug báo nhanh vẫn lưu được
+    # (Notion trả 400 nếu gửi property không tồn tại).
+    if character:
+        props[p["character"]] = _rich_text(character)
+    if level is not None:
+        props[p["level"]] = _number(level)
+    if map_name:
+        props[p["map"]] = _rich_text(map_name)
 
     children = _text_block("heading_2", "Mô tả") + _paragraphs(description)
     if steps:

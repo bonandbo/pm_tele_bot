@@ -99,7 +99,8 @@ def test_create_bug_sets_new_props_and_image_block(monkeypatch):
     assert "api.telegram.org" not in json.dumps(body)
 
 
-def test_create_bug_without_level_sends_null_number(monkeypatch):
+def test_create_bug_omits_empty_new_props(monkeypatch):
+    """DB chưa thêm cột Nhân vật/Cấp/Bản đồ vẫn phải lưu được bug báo nhanh (Notion 400 nếu gửi cột lạ)."""
     pages = []
 
     def handler(request):
@@ -108,7 +109,9 @@ def test_create_bug_without_level_sends_null_number(monkeypatch):
 
     _mock(monkeypatch, handler)
     asyncio.run(nc.create_bug(title="T", description="D"))
-    assert pages[0]["properties"][P["level"]] == {"number": None}
+    props = pages[0]["properties"]
+    for key in ("character", "level", "map", "github_issue"):
+        assert P[key] not in props, key
     assert not [b for b in pages[0]["children"] if b["type"] == "image"]
 
 

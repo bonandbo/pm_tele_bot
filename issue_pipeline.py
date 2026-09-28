@@ -114,7 +114,11 @@ async def publish(bug: BugInput, fields: IssueFields) -> str:
         page = await nc.get_page(bug.page_id)
     except Exception as exc:
         raise PipelineError("không đọc được bug từ Notion") from exc
-    existing = nc.get_prop(page, config.BUG_PROPS["github_issue"])
+    gh_prop = config.BUG_PROPS["github_issue"]
+    if gh_prop not in page.get("properties", {}):
+        # Không có cột thì không ghi ngược được link → mỗi lần chạy lại sẽ tạo issue trùng
+        raise PipelineError(f"Notion chưa có cột '{gh_prop}' (kiểu URL) trong Bug Tracker")
+    existing = nc.get_prop(page, gh_prop)
     if existing:
         return existing
 

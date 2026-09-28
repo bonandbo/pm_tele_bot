@@ -125,6 +125,14 @@ def _patch_publish(monkeypatch, page, *, download_fails=False, github_fails=Fals
     return calls
 
 
+def test_publish_refuses_when_github_column_missing(monkeypatch):
+    """Thiếu cột GitHub Issue → không ghi ngược được → mỗi lần chạy lại sẽ tạo issue trùng. Phải dừng trước."""
+    calls = _patch_publish(monkeypatch, bug_page(github_issue=None))
+    with pytest.raises(ip.PipelineError, match="GitHub Issue"):
+        asyncio.run(ip.publish(_bug(), _fields()))
+    assert not [c for c in calls if c[0] == "issue"]
+
+
 def test_publish_existing_issue_short_circuits(monkeypatch):
     calls = _patch_publish(monkeypatch, bug_page(github_issue=url_prop(ISSUE_URL)))
     assert asyncio.run(ip.publish(_bug(), _fields())) == ISSUE_URL

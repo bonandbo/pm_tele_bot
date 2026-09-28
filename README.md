@@ -60,11 +60,17 @@ python bot.py
 
 Bot **không cần** quyền admin trong group.
 
-### 5. GitHub issue tự động (tuỳ chọn)
+### 5. Thêm cột Notion (bắt buộc khi nâng cấp)
+
+Thêm 4 cột vào Bug Tracker **trước khi** chạy bản này: `Nhân vật` (Text), `Cấp` (Number), `Bản đồ` (Text), `GitHub Issue` (URL). Tên phải khớp `BUG_PROPS` trong `config.py`.
+
+Thiếu cột thì `/bug` trong chat riêng lỗi khi người báo điền Nhân vật / Cấp / Bản đồ (Notion từ chối cột không tồn tại), và bot không tạo GitHub issue.
+
+### 6. GitHub issue tự động (tuỳ chọn)
 
 Mỗi bug lưu vào Notion được LLM chuyển thành một GitHub issue theo template (Triệu chứng / Cách tái hiện / Môi trường / Log / Miền nghi ngờ) để AI agent đọc. Notion vẫn là nơi người đọc; issue ghi BUG-ID và link Notion, Notion lưu link issue ở cột **GitHub Issue**.
 
-1. **Notion** — thêm 4 cột vào Bug Tracker: `Nhân vật` (Text), `Cấp` (Number), `Bản đồ` (Text), `GitHub Issue` (URL). Tên phải khớp `BUG_PROPS` trong `config.py`.
+1. **Notion** — đã thêm 4 cột ở bước 5.
 2. **GitHub token** — github.com → Settings → Developer settings → Fine-grained tokens → chỉ chọn repo nhận issue, quyền **Issues: Read and write** và **Contents: Read and write**.
 3. **Branch ảnh** — ảnh bug được commit vào branch riêng để không làm bẩn `main`. Tạo một lần trong clone của repo đó:
    ```bash
