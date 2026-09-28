@@ -56,9 +56,9 @@ log = logging.getLogger(__name__)
 
 # Trạng thái hội thoại (chỉ dùng trong chat riêng)
 (
-    BUG_TITLE, BUG_DESC, BUG_STEPS, BUG_SEVERITY,
-    BUG_VERSION, BUG_MODULE, BUG_IMAGE,
-) = range(7)
+    BUG_TITLE, BUG_DESC, BUG_STEPS, BUG_CHAR, BUG_LEVEL, BUG_MAP,
+    BUG_SEVERITY, BUG_VERSION, BUG_MODULE, BUG_IMAGE, BUG_CLARIFY,
+) = range(11)
 (
     FEAT_TITLE, FEAT_DESC, FEAT_IMPACT, FEAT_EFFORT, FEAT_IMAGE,
 ) = range(100, 105)
@@ -117,6 +117,18 @@ def _normalize_version(raw: str) -> Optional[str]:
     if not any(ch.isdigit() for ch in v):
         return None
     return f"v{v}"
+
+
+_LEVEL_RE = re.compile(r"^(?:cấp|cap|lv\.?|level)?\s*(\d{1,4})$", re.IGNORECASE)
+
+
+def _parse_level(text: str) -> Optional[int]:
+    """'90', 'cấp 90', 'Lv.120' → số. Không phải số / bằng 0 / từ 1000 trở lên → None."""
+    m = _LEVEL_RE.match((text or "").strip())
+    if not m:
+        return None
+    level = int(m.group(1))
+    return level if 0 < level < 1000 else None
 
 
 # Workspace Notion free giới hạn 5 MB/file
@@ -539,6 +551,38 @@ async def bug_desc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 async def bug_steps(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     text = update.message.text.strip()
     context.user_data["steps"] = "" if text == SKIP else text
+    await update.message.reply_text(
+        "Nhân vật gặp lỗi (môn phái / tên nhân vật)?", reply_markup=_kb([], add_skip=True)
+    )
+    return BUG_CHAR
+
+
+async def bug_char(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = update.message.text.strip()
+    context.user_data["character"] = "" if text == SKIP else text
+    await update.message.reply_text("Cấp nhân vật?", reply_markup=_kb([], add_skip=True))
+    return BUG_LEVEL
+
+
+async def bug_level(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = update.message.text.strip()
+    if text == SKIP:
+        context.user_data["level"] = None
+    else:
+        level = _parse_level(text)
+        if level is None:
+            await update.message.reply_text(
+                "Cấp là số, vd 90. Hoặc bấm Bỏ qua.", reply_markup=_kb([], add_skip=True)
+            )
+            return BUG_LEVEL
+        context.user_data["level"] = level
+    await update.message.reply_text("Gặp lỗi ở bản đồ nào?", reply_markup=_kb([], add_skip=True))
+    return BUG_MAP
+
+
+async def bug_map(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = update.message.text.strip()
+    context.user_data["map"] = "" if text == SKIP else text
     await update.message.reply_text("Mức độ nghiêm trọng?", reply_markup=_kb(config.SEVERITIES))
     return BUG_SEVERITY
 
@@ -586,6 +630,9 @@ async def bug_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             severity=d.get("severity"),
             version_found=d.get("version"),
             modules=d.get("modules"),
+            character=d.get("character", ""),
+            level=d.get("level"),
+            map_name=d.get("map", ""),
             reporter=_reporter_name(update),
             telegram_id=str(update.effective_chat.id),
             images=images,
@@ -1236,6 +1283,9 @@ def main() -> None:
             BUG_TITLE: [MessageHandler(private & filters.TEXT & ~filters.COMMAND, bug_title)],
             BUG_DESC: [MessageHandler(private & filters.TEXT & ~filters.COMMAND, bug_desc)],
             BUG_STEPS: [MessageHandler(private & filters.TEXT & ~filters.COMMAND, bug_steps)],
+            BUG_CHAR: [MessageHandler(private & filters.TEXT & ~filters.COMMAND, bug_char)],
+            BUG_LEVEL: [MessageHandler(private & filters.TEXT & ~filters.COMMAND, bug_level)],
+            BUG_MAP: [MessageHandler(private & filters.TEXT & ~filters.COMMAND, bug_map)],
             BUG_SEVERITY: [MessageHandler(private & filters.TEXT & ~filters.COMMAND, bug_severity)],
             BUG_VERSION: [MessageHandler(private & filters.TEXT & ~filters.COMMAND, bug_version)],
             BUG_MODULE: [MessageHandler(private & filters.TEXT & ~filters.COMMAND, bug_module)],
